@@ -1,0 +1,19 @@
+# Xcode
+*.xcworkspace
+*.xcuserdata
+*.xcodeproj/xcuserdata/
+DerivedData/
+.build/
+*.o
+*.d
+
+# macOS
+.DS_Store
+*~
+
+# Swift Package Manager
+Packages/
+.packages/
+
+# Local scripts and documentation
+AI_CONTEXT.md
