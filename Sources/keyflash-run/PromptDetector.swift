@@ -33,6 +33,45 @@ public class PromptDetector {
         self.gapAccumulator = ""
     }
 
+    /// Strip ANSI escape sequences from text.
+    private func stripANSI(_ text: String) -> String {
+        // Matches ESC [ <digits> ; <digits> ... m  (SGR codes)
+        // Also ESC ] <text> BEL (OSC codes like title)
+        // And other common CSI sequences
+        var result = ""
+        var inEscape = false
+        var inOSC = false
+        for char in text {
+            if char == "\u{1B}" {
+                inEscape = true
+                continue
+            }
+            if inEscape {
+                if char == "[" {
+                    continue // CSI sequence starts
+                } else if char == "]" {
+                    inOSC = true
+                    inEscape = false
+                    continue
+                } else {
+                    inEscape = false
+                    continue
+                }
+            }
+            if inOSC {
+                if char == "\u{0007}" || char == "\u{1B}" {
+                    inOSC = false
+                    if char == "\u{1B}" { inEscape = true }
+                }
+                continue
+            }
+            // Control chars except newline/tab
+            if char < " " && char != "\n" && char != "\t" { continue }
+            result.append(char)
+        }
+        return result
+    }
+
     /// Feed incoming PTY output data to the detector.
     /// - Returns: `true` if a task completion was detected.
     @discardableResult
@@ -40,6 +79,9 @@ public class PromptDetector {
         guard let text = String(data: data, encoding: .utf8) else {
             return false
         }
+
+        // Strip ANSI escape codes before matching — TUI apps wrap prompts in color codes
+        let clean = stripANSI(text)
 
         let now = Date()
         let gapSinceLast = now.timeIntervalSince(sinceLastOutput)
@@ -54,7 +96,7 @@ public class PromptDetector {
         // If we've been idle long enough, accumulate into gap buffer
         if gapSinceLast >= minIdleThreshold {
             inGap = true
-            gapAccumulator += text
+            gapAccumulator += clean
         } else if inGap {
             // We were in a gap but output arrived quickly — gap is over
             // Check accumulated gap text before resetting
@@ -68,7 +110,7 @@ public class PromptDetector {
         sinceLastOutput = now
 
         // Check current chunk for prompt patterns
-        if checkForPrompt(in: text, gapBefore: gapSinceLast) {
+        if checkForPrompt(in: clean, gapBefore: gapSinceLast) {
             return true
         }
 

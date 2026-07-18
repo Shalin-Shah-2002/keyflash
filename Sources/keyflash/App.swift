@@ -63,7 +63,10 @@ class BacklightFlickerController {
 
     private func userDidInteract() {
         log("BacklightFlicker: user interacted")
-        eventMonitor = nil
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
         flashTask?.terminate()
         flashTask = nil
     }
