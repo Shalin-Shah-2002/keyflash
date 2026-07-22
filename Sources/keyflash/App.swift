@@ -10,10 +10,8 @@ private let logFile = "/tmp/keyflash.log"
 func log(_ msg: String) {
     let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
     let line = "[\(ts)] \(msg)\n"
-    // Write to both os_log (system) and file (for tail)
     os_log(.debug, "keyflash: %{public}s", msg)
     if let data = line.data(using: .utf8) {
-        // Use FileHandle with O_APPEND via low-level POSIX to ensure it works
         let fd = open(logFile, O_WRONLY | O_CREAT | O_APPEND, 0o644)
         if fd >= 0 {
             data.withUnsafeBytes { buf in
@@ -29,29 +27,35 @@ func log(_ msg: String) {
 class BacklightFlickerController {
     static let shared = BacklightFlickerController()
     private var eventMonitor: Any?
-    private var flashTask: Process?  // Keep reference to prevent dealloc (kills child!)
+    private var flashTask: Process?
 
-    /// Flash keyboard backlight continuously until user interaction.
     func flickerUntilInteraction() {
         log("BacklightFlicker: starting")
         flashTask?.terminate()
         flashTask = nil
         eventMonitor = nil
 
+        // Use Backlight() from KeyflashCore to find mac-brightnessctl in all
+        // known locations (/opt/homebrew/bin, /usr/local/bin, etc.).
+        guard let backlight = Backlight() else {
+            log("BacklightFlicker: mac-brightnessctl not found, cannot flash")
+            return
+        }
+
         let task = Process()
-        task.launchPath = "/opt/homebrew/bin/mac-brightnessctl"
+        task.launchPath = backlight.binaryPath
         task.arguments = ["-f", "99999", "0.4", "200"]
         task.terminationHandler = { [weak self] _ in
             log("BacklightFlicker: flash exited, restoring brightness")
             self?.flashTask = nil
             let restore = Process()
-            restore.launchPath = "/opt/homebrew/bin/mac-brightnessctl"
+            restore.launchPath = backlight.binaryPath
             restore.arguments = ["1"]
             try? restore.run()
         }
         do {
             try task.run()
-            flashTask = task  // Keep reference alive!
+            flashTask = task
         } catch { return }
         log("BacklightFlicker: flash running")
 
@@ -71,100 +75,85 @@ class BacklightFlickerController {
         flashTask = nil
     }
 
-    func testPulse() { flickerUntilInteraction() }
-}
-
-// ── Task Complete Manager ──
-
-class TaskCompleteManager: ObservableObject {
-    static let shared = TaskCompleteManager()
-    @Published var statusText: String = "Idle"
-    @Published var isActive: Bool = false
-
-    func handleTaskComplete(agent: String, pid: Int) {
-        log("TaskCompleteManager.handleTaskComplete: agent=\(agent) pid=\(pid)")
-        DispatchQueue.main.async {
-            self.isActive = true
-            self.statusText = "Wrapping: \(agent) (pid \(pid))"
-        }
-
-        // MUST run on main thread — Timer needs a run loop
-        DispatchQueue.main.async {
-            let config = ConfigLoader.load()
-            if config.enabled {
-                log("TaskCompleteManager: calling flickerUntilInteraction")
-                BacklightFlickerController.shared.flickerUntilInteraction()
-            }
-            self.isActive = false
-            self.statusText = "Idle"
-        }
-    }
+    func testFlicker() { log("BacklightFlicker: test pulse"); flickerUntilInteraction() }
 }
 
 // ── AppDelegate ──
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var notificationService: NotificationService?
+    var settingsWindowController: NSWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("AppDelegate: applicationDidFinishLaunching")
-        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
-        notificationService = NotificationService { agent, pid in
+        // Configure as an accessory (menu-bar-only) app. This ensures the
+        // NSStatusItem / MenuBarExtra icon appears immediately, even on a
+        // fresh DMG install where macOS hasn't cached the app's activation policy.
+        NSApp.setActivationPolicy(.accessory)
+        startNotificationService()
+    }
+
+    private func startNotificationService() {
+        notificationService = NotificationService { [weak self] agent, pid in
             log("AppDelegate: received task done — agent=\(agent) pid=\(pid)")
-            TaskCompleteManager.shared.handleTaskComplete(agent: agent, pid: pid)
+            self?.handleTaskComplete()
         }
         notificationService?.startListening()
         log("AppDelegate: NotificationService started")
+    }
 
-        // Flash backlight on launch to confirm it works
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            log("AppDelegate: startup flash test")
-            let task = Process()
-            task.launchPath = "/opt/homebrew/bin/mac-brightnessctl"
-            task.arguments = ["-f", "3", "0.3", "200"]
-            try? task.run()
-            task.waitUntilExit()
-            log("AppDelegate: startup flash complete")
+    func handleTaskComplete() {
+        log("AppDelegate: handleTaskComplete")
+        let config = ConfigLoader.load()
+        if config.enabled {
+            BacklightFlickerController.shared.flickerUntilInteraction()
         }
+    }
+
+    @objc func testFlicker() { BacklightFlickerController.shared.testFlicker() }
+
+    @objc func openSettings() {
+        log("AppDelegate: opening settings")
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 500),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered, defer: false
+        )
+        window.title = "keyflash Settings"
+        window.contentView = NSHostingView(rootView: SettingsWindow())
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindowController = NSWindowController(window: window)
+    }
+
+    @objc func installHook() {
+        ShellHookInstaller.installIfNeeded()
+        let alert = NSAlert()
+        alert.messageText = "Shell hook installed"
+        alert.runModal()
     }
 }
 
-// ── App Entry ──
+// ── SwiftUI Menu Bar App ──
 
 @main
 struct KeyflashApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var manager = TaskCompleteManager.shared
 
     var body: some Scene {
         MenuBarExtra("keyflash", systemImage: "bolt.fill") {
             Text("keyflash v0.2")
-            Text("Status: \(manager.statusText)")
             Divider()
-            Button("Test Flicker") { BacklightFlickerController.shared.testPulse() }
-            Button("Settings…") { openSettings() }
-            Button("Install Shell Hook") {
-                ShellHookInstaller.installIfNeeded()
-                let alert = NSAlert()
-                alert.messageText = "Shell hook installed"
-                alert.runModal()
-            }
+            Button("Test Flicker") { delegate.testFlicker() }
+            Button("Settings…") { delegate.openSettings() }
+            Button("Install Shell Hook") { delegate.installHook() }
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
-                .keyboardShortcut("q")
+        }
+
+        Settings {
+            EmptyView()
         }
     }
-}
-
-func openSettings() {
-    let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 400, height: 500),
-        styleMask: [.titled, .closable, .miniaturizable],
-        backing: .buffered, defer: false
-    )
-    window.title = "keyflash Settings"
-    window.contentView = NSHostingView(rootView: SettingsWindow())
-    window.center()
-    window.makeKeyAndOrderFront(nil)
-    NSApp.activate(ignoringOtherApps: true)
 }

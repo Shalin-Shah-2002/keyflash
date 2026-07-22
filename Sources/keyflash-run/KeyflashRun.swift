@@ -20,26 +20,37 @@ func writeLog(_ msg: String) {
     }
 }
 
+/// Sends a task-done event to the menu bar app, which triggers the
+/// highly-visible continuous backlight flicker (flashes until the user
+/// presses a key or clicks the mouse).
+///
+/// This is the primary notification path. The direct Backlight.pulse() 2-flash
+/// was too subtle — the menu bar's flickerUntilInteraction() is the real signal.
+private func notifyMenuBarApp(agent: String) {
+    writeLog("notifyMenuBarApp: sending taskDone for agent=\(agent)")
+    NotifyClient.sendDone(agent: agent, pid: Int(ProcessInfo.processInfo.processIdentifier))
+}
+
 /// The PTY-wrapper CLI for keyflash.
 ///
 /// Spawns the agent command under a pseudo-terminal, forwards all I/O
-/// transparently, and detects when the agent yields back to the user.
+/// transparently, and notifies the keyflash menu bar app on task completion,
+/// which then triggers the continuous keyboard backlight flicker.
 @main
 struct KeyflashRun: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "keyflash-run",
-        abstract: "Wrap a coding-agent CLI and pulse the keyboard backlight on task completion.",
+        abstract: "Wrap a coding-agent CLI and flash the keyboard backlight on task completion.",
         discussion: """
         Examples:
-          keyflash-run -- claude code
+          keyflash-run -- claude
           keyflash-run -- opencode
           keyflash-run --test-pulse
-          keyflash-run --test-flash
         """,
         version: "0.1.0"
     )
 
-    @Argument(help: "Command and arguments to wrap (e.g. \"claude code\")")
+    @Argument(help: "Command and arguments to wrap (e.g. \"claude\")")
     var commandArgs: [String] = []
 
     @Flag(name: .long, help: "Test keyboard backlight pulse")
@@ -49,10 +60,6 @@ struct KeyflashRun: ParsableCommand {
     var debug = false
 
     mutating func run() throws {
-        if debug {
-            setenv("KEYFLASH_DEBUG", "1", 1)
-        }
-
         if testPulse {
             runTestPulse()
             return
@@ -68,7 +75,7 @@ struct KeyflashRun: ParsableCommand {
     private func runTestPulse() {
         print("🔦 Testing keyboard backlight pulse...")
         guard let backlight = Backlight() else {
-            print("⚠️  Could not access keyboard backlight. Try: sudo keyflash-run --test-pulse")
+            print("⚠️  Could not access keyboard backlight.")
             Darwin.exit(1)
         }
         backlight.pulse()
@@ -76,48 +83,44 @@ struct KeyflashRun: ParsableCommand {
     }
 
     private func runPTY() {
-        var env = ProcessInfo.processInfo.environment
-        env["KEYFLASH_ACTIVE"] = "1"
-
         let config = ConfigLoader.load()
         let agentName = URL(fileURLWithPath: commandArgs[0]).lastPathComponent
 
-        // Track whether we already sent a mid-session notification
-        var midSessionNotified = false
+        var didDetectMidSession = false
 
         let pty = PTYSpawn()
         let (exitCode, detected) = pty.run(
             command: commandArgs,
-            environment: env,
-            debug: debug,
-            onTaskComplete: { agent in
-                // Called when prompt detector sees task completion mid-session
-                guard config.enabled, !midSessionNotified else { return }
-                midSessionNotified = true
-                writeLog("keyflash-run: mid-session task complete for agent=\(agentName)")
-                NotifyClient.sendDone(agent: agentName, pid: Int(getpid()))
+            // Always log debug decisions to /tmp/keyflash.log so we can diagnose
+            // prompt detection without recompiling with --debug.
+            debug: true,
+            onTaskComplete: { _ in
+                guard config.enabled else { return }
+                didDetectMidSession = true
+                writeLog("keyflash-run: mid-session task complete — notifying menu bar app (agent=\(agentName))")
+                // Notify menu bar app → triggers continuous backlight flicker
+                // (mac-brightnessctl -f 99999) until user presses a key/clicks.
+                notifyMenuBarApp(agent: agentName)
             }
         )
 
         writeLog("keyflash-run: agent=\(agentName) exitCode=\(exitCode) detected=\(detected)")
 
-        if !config.enabled {
-            writeLog("keyflash-run: config.enabled=false, skipping")
+        guard config.enabled else {
+            writeLog("keyflash-run: config.enabled=false, skipping notification")
             if exitCode != 0 { Darwin.exit(exitCode) }
             return
         }
 
-        // If prompt wasn't detected mid-session, notify on exit as fallback
-        if !midSessionNotified {
-            writeLog("keyflash-run: sending exit notification (no mid-session detection)")
-            NotifyClient.sendDone(agent: agentName, pid: Int(getpid()))
+        // If the prompt detector never fired during the session (e.g. very short
+        // command that exited immediately), still notify on exit so the backlight
+        // flashes at least once.
+        if !didDetectMidSession {
+            writeLog("keyflash-run: no mid-session detection — sending exit notification to menu bar app")
+            notifyMenuBarApp(agent: agentName)
         }
 
         writeLog("keyflash-run: done")
-
-        if debug {
-            print("[keyflash] Agent completed with exit code \(exitCode), detected: \(detected)")
-        }
 
         if exitCode != 0 {
             Darwin.exit(exitCode)

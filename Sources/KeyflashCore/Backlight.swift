@@ -23,7 +23,7 @@ public func keyflashLog(_ msg: String) {
 /// `KeyboardBrightnessClient` API to control keyboard backlight.
 /// It's installed alongside keyflash and provides reliable brightness control.
 public final class Backlight {
-    private let binaryPath: String
+    public let binaryPath: String
 
     public init?() {
         // Find mac-brightnessctl in known locations

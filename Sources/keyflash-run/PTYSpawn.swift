@@ -106,9 +106,9 @@ public class PTYSpawn {
         defer { restoreRawMode(&origTerm) }
 
         let detector = PromptDetector(debug: debug)
-        var detected = false
         var childExited = false
         var childStatus: Int32 = 0
+        var lastDetectedAt: Date = .distantPast  // cooldown: don't re-fire within 1s
 
         // SIGWINCH handler — forward terminal size changes to child PTY
         // Need to call sigaction() first so DispatchSource can intercept the signal
@@ -130,7 +130,10 @@ public class PTYSpawn {
         let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO)
         stdinSource.setEventHandler {
             let n = read(STDIN_FILENO, &stdinBuf, stdinBuf.count)
-            if n > 0 { write(masterFd, stdinBuf, n) }
+            if n > 0 {
+                write(masterFd, stdinBuf, n)
+                detector.noteUserInput()
+            }
         }
         stdinSource.resume()
         defer { stdinSource.cancel() }
@@ -147,9 +150,13 @@ public class PTYSpawn {
                     let n = read(masterFd, &buf, buf.count)
                     if n > 0 {
                         write(STDOUT_FILENO, buf, n)
-                        if !detected {
-                            if detector.feed(Data(bytes: buf, count: n)) {
-                                detected = true
+                        // Multi-fire: allow detection on every completed response.
+                        // A cooldown prevents duplicate firings when the prompt
+                        // spans multiple PTY chunks (~1 second).
+                        if detector.feed(Data(bytes: buf, count: n)) {
+                            let now = Date()
+                            if now.timeIntervalSince(lastDetectedAt) > 1.0 {
+                                lastDetectedAt = now
                                 onTaskComplete?(command[0])
                             }
                         }
@@ -170,8 +177,8 @@ public class PTYSpawn {
             }
         }
 
-        // If detected but child alive, keep forwarding until exit
-        if detected && !childDidExit(childStatus) {
+        // If child still alive after main loop ends, drain remaining output
+        if !childDidExit(childStatus) {
             var buf2 = [UInt8](repeating: 0, count: 65536)
             var pfd2 = pollfd(fd: masterFd, events: Int16(POLLIN), revents: 0)
             while true {
@@ -190,7 +197,8 @@ public class PTYSpawn {
 
         close(masterFd)
         let exitCode = (childStatus & 0xFF00) >> 8
-        return (exitCode, detected)
+        let anyDetection = lastDetectedAt != .distantPast
+        return (exitCode, anyDetection)
     }
 
     private func childDidExit(_ status: Int32) -> Bool {

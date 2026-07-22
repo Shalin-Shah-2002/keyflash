@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:keyflash}",
+            "name": "Debug keyflash",
+            "target": "keyflash",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug keyflash"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:keyflash}",
+            "name": "Release keyflash",
+            "target": "keyflash",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release keyflash"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:keyflash}",
+            "name": "Debug keyflash-run",
+            "target": "keyflash-run",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug keyflash-run"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:keyflash}",
+            "name": "Release keyflash-run",
+            "target": "keyflash-run",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release keyflash-run"
+        }
+    ]
+}
