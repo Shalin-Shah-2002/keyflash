@@ -1,14 +1,18 @@
-<img src="https://img.shields.io/badge/macOS-14%2B-orange?logo=apple" alt="macOS 14+" />
-<img src="https://img.shields.io/badge/Swift-5.9-orange?logo=swift" alt="Swift 5.9" />
-<img src="https://img.shields.io/badge/License-MIT-yellow" alt="License: MIT" />
+<p align="center">
+  <img src="Assets/KeyFlash_Logo.png" alt="keyflash Logo" width="120">
+</p>
 
-<h1 align="center">
-  ⌨️ keyflash
-</h1>
+<h1 align="center">⌨️ keyflash</h1>
 
 <p align="center">
   <strong>Never miss an AI agent's response again.</strong><br>
   <em>Your MacBook keyboard backlight becomes your productivity radar.</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-14%2B-orange?logo=apple" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-5.9-orange?logo=swift" alt="Swift 5.9">
+  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License: MIT">
 </p>
 
 <p align="center">
@@ -288,6 +292,7 @@ keyflash is composed of **three binaries** that work together:
 
 ```
 keyflash/
+├── Assets/                    # App icon and media assets
 ├── Package.swift              # Swift Package Manager manifest
 ├── Sources/
 │   ├── keyflash/              # Menu bar app
