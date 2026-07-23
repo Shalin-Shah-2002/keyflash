@@ -150,16 +150,7 @@ public class PTYSpawn {
                     let n = read(masterFd, &buf, buf.count)
                     if n > 0 {
                         write(STDOUT_FILENO, buf, n)
-                        // Multi-fire: allow detection on every completed response.
-                        // A cooldown prevents duplicate firings when the prompt
-                        // spans multiple PTY chunks (~1 second).
-                        if detector.feed(Data(bytes: buf, count: n)) {
-                            let now = Date()
-                            if now.timeIntervalSince(lastDetectedAt) > 1.0 {
-                                lastDetectedAt = now
-                                onTaskComplete?(command[0])
-                            }
-                        }
+                        _ = detector.feed(Data(bytes: buf, count: n))
                     } else {
                         childExited = true  // EOF
                     }
@@ -167,6 +158,15 @@ public class PTYSpawn {
             } else if ret == -1 {
                 if errno == EINTR { continue }
                 childExited = true
+            }
+
+            // Check if response completed and went silent
+            if detector.checkIdleSilence() {
+                let now = Date()
+                if now.timeIntervalSince(lastDetectedAt) > 1.0 {
+                    lastDetectedAt = now
+                    onTaskComplete?(command[0])
+                }
             }
 
             // Non-blocking child status check

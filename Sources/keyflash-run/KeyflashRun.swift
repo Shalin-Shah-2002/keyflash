@@ -85,21 +85,13 @@ struct KeyflashRun: ParsableCommand {
     private func runPTY() {
         let config = ConfigLoader.load()
         let agentName = URL(fileURLWithPath: commandArgs[0]).lastPathComponent
-
-        var didDetectMidSession = false
-
         let pty = PTYSpawn()
         let (exitCode, detected) = pty.run(
             command: commandArgs,
-            // Always log debug decisions to /tmp/keyflash.log so we can diagnose
-            // prompt detection without recompiling with --debug.
             debug: true,
             onTaskComplete: { _ in
                 guard config.enabled else { return }
-                didDetectMidSession = true
                 writeLog("keyflash-run: mid-session task complete — notifying menu bar app (agent=\(agentName))")
-                // Notify menu bar app → triggers continuous backlight flicker
-                // (mac-brightnessctl -f 99999) until user presses a key/clicks.
                 notifyMenuBarApp(agent: agentName)
             }
         )
@@ -112,13 +104,8 @@ struct KeyflashRun: ParsableCommand {
             return
         }
 
-        // If the prompt detector never fired during the session (e.g. very short
-        // command that exited immediately), still notify on exit so the backlight
-        // flashes at least once.
-        if !didDetectMidSession {
-            writeLog("keyflash-run: no mid-session detection — sending exit notification to menu bar app")
-            notifyMenuBarApp(agent: agentName)
-        }
+        // Mid-session detection handles all notifications when Claude Code is waiting for prompt.
+        // We do NOT send notification on process exit to avoid flashing when closing the app.
 
         writeLog("keyflash-run: done")
 
