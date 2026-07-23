@@ -135,6 +135,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// ── Menu Bar Icon ──
+
+private let menuBarIcon: NSImage = {
+    let image = NSImage(named: "KeyFlash_MenuIcon")
+        ?? NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "keyflash")!
+    image.isTemplate = true
+    image.size = NSSize(width: 18, height: 18)
+    return image
+}()
+
 // ── SwiftUI Menu Bar App ──
 
 @main
@@ -142,7 +152,7 @@ struct KeyflashApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
     var body: some Scene {
-        MenuBarExtra("keyflash", systemImage: "bolt.fill") {
+        MenuBarExtra {
             Text("keyflash v0.2")
             Divider()
             Button("Test Flicker") { delegate.testFlicker() }
@@ -150,6 +160,8 @@ struct KeyflashApp: App {
             Button("Install Shell Hook") { delegate.installHook() }
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
+        } label: {
+            Image(nsImage: menuBarIcon)
         }
 
         Settings {

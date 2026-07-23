@@ -16,5 +16,7 @@
     <string>0.2</string>
     <key>LSUIElement</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>KeyFlash_Logo</string>
 </dict>
 </plist>

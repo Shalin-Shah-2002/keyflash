@@ -27,6 +27,11 @@ cp "$BUILD_DIR/keyflash" "$APP_DIR/Contents/MacOS/keyflash"
 cp "$BUILD_DIR/keyflash-run" "$APP_DIR/Contents/MacOS/keyflash-run"
 cp "$PROJECT_DIR/Scripts/mac-brightnessctl/mac-brightnessctl" "$APP_DIR/Contents/MacOS/mac-brightnessctl"
 
+# Create Resources directory and copy app icon
+mkdir -p "$APP_DIR/Contents/Resources"
+cp "$PROJECT_DIR/Assets/KeyFlash_Logo.icns" "$APP_DIR/Contents/Resources/"
+cp "$PROJECT_DIR/Assets/KeyFlash_MenuIcon.png" "$APP_DIR/Contents/Resources/"
+
 # Copy Info.plist
 cp "$PROJECT_DIR/Scripts/keyflash-Info.plist" "$APP_DIR/Contents/Info.plist"
 

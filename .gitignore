@@ -15,5 +15,8 @@ DerivedData/
 Packages/
 .packages/
 
+# Generated icon artifacts
+Assets/KeyFlash_Logo.iconset/
+
 # Local scripts and documentation
 AI_CONTEXT.md
