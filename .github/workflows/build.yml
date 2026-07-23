@@ -1,0 +1,102 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build keyflash.dmg
+    runs-on: macos-15
+    strategy:
+      matrix:
+        xcode: ["16.2"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ matrix.xcode }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build app bundle
+        run: |
+          chmod +x Scripts/build-app.sh
+          ./Scripts/build-app.sh release
+
+      - name: Build DMG
+        run: |
+          chmod +x Scripts/build-dmg.sh
+          ./Scripts/build-dmg.sh
+
+      - name: Upload DMG as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyflash-dmg
+          path: .build/release/keyflash.dmg
+          if-no-files-found: error
+
+      - name: Upload .app bundle (debug archive)
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyflash-app
+          path: .build/release/keyflash.app
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+
+    steps:
+      - name: Download DMG artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: keyflash-dmg
+
+      - name: Extract version from tag
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          cat <<EOF > release-notes.md
+          ## keyflash ${{ steps.version.outputs.tag }}
+
+          ### 📦 Download
+          - **keyflash.dmg** — disk image ready to mount and drag into /Applications
+
+          ### 🔨 Build from Source
+          \`\`\`bash
+          git clone https://github.com/${{ github.repository }}.git
+          cd keyflash
+          ./Scripts/build-app.sh release
+          open .build/release/keyflash.app
+          \`\`\`
+
+          ### ✅ Requirements
+          - macOS 14 (Sonoma) or later
+          - Mac with a keyboard backlight (MacBook Pro/Air, Magic Keyboard)
+          EOF
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ steps.version.outputs.tag }}"
+          --repo "${{ github.repository }}"
+          --title "keyflash ${{ steps.version.outputs.tag }}"
+          --notes-file release-notes.md
+          keyflash.dmg
