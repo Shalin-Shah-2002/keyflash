@@ -2,26 +2,27 @@ name: Build and Release
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     tags:
       - "v*.*.*"
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     name: Build keyflash.dmg
     runs-on: macos-15
-    strategy:
-      matrix:
-        xcode: ["16.2"]
+    permissions:
+      contents: write
+      attestations: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Select Xcode ${{ matrix.xcode }}
-        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
 
       - name: Show Swift version
         run: swift --version
@@ -50,30 +51,46 @@ jobs:
           path: .build/release/keyflash.app
           if-no-files-found: error
 
-  release:
-    name: Create GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      attestations: write
-
-    steps:
-      - name: Download DMG artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: keyflash-dmg
-
-      - name: Extract version from tag
-        id: version
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-
-      - name: Generate release notes
-        id: notes
+      # ── Rolling release on every push to main ──
+      - name: Create / Update rolling release (push to main)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          TAG="continuous"
+          SHA_SHORT="${GITHUB_SHA:0:7}"
+
+          # Write release notes
           cat <<EOF > release-notes.md
-          ## keyflash ${{ steps.version.outputs.tag }}
+          ## keyflash build #${{ github.run_number }} ($SHA_SHORT)
+
+          **Continuous build** from commit [$SHA_SHORT](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}).
+
+          This release updates on every push to \`main\`. Download \`keyflash.dmg\`, open it, and drag the app into \`/Applications\`.
+          EOF
+
+          # Delete existing release + tag if present
+          gh release delete "$TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          git push origin --delete refs/tags/"$TAG" 2>/dev/null || true
+
+          # Create new release
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "keyflash build #${{ github.run_number }} ($SHA_SHORT)" \
+            --notes-file release-notes.md \
+            --latest \
+            .build/release/keyflash.dmg
+
+      # ── Versioned release on tag push ──
+      - name: Create versioned release (tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          cat <<EOF > release-notes.md
+          ## keyflash $TAG
 
           ### 📦 Download
           - **keyflash.dmg** — disk image ready to mount and drag into /Applications
@@ -91,12 +108,8 @@ jobs:
           - Mac with a keyboard backlight (MacBook Pro/Air, Magic Keyboard)
           EOF
 
-      - name: Create Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "${{ steps.version.outputs.tag }}"
-          --repo "${{ github.repository }}"
-          --title "keyflash ${{ steps.version.outputs.tag }}"
-          --notes-file release-notes.md
-          keyflash.dmg
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "keyflash $TAG" \
+            --notes-file release-notes.md \
+            .build/release/keyflash.dmg
