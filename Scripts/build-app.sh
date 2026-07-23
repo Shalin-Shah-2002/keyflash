@@ -17,9 +17,15 @@ echo "📦 Creating keyflash.app bundle..."
 # Create .app directory structure
 mkdir -p "$APP_DIR/Contents/MacOS"
 
+# Compile mac-brightnessctl from source
+echo "🔨 Compiling mac-brightnessctl..."
+make -C "$PROJECT_DIR/Scripts/mac-brightnessctl" clean
+make -C "$PROJECT_DIR/Scripts/mac-brightnessctl"
+
 # Copy binaries
 cp "$BUILD_DIR/keyflash" "$APP_DIR/Contents/MacOS/keyflash"
 cp "$BUILD_DIR/keyflash-run" "$APP_DIR/Contents/MacOS/keyflash-run"
+cp "$PROJECT_DIR/Scripts/mac-brightnessctl/mac-brightnessctl" "$APP_DIR/Contents/MacOS/mac-brightnessctl"
 
 # Copy Info.plist
 cp "$PROJECT_DIR/Scripts/keyflash-Info.plist" "$APP_DIR/Contents/Info.plist"
@@ -27,6 +33,7 @@ cp "$PROJECT_DIR/Scripts/keyflash-Info.plist" "$APP_DIR/Contents/Info.plist"
 # Sign with ad-hoc signature (required for macOS)
 codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash"
 codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash-run"
+codesign --force --sign - "$APP_DIR/Contents/MacOS/mac-brightnessctl"
 codesign --force --sign - "$APP_DIR"
 
 echo "✅ keyflash.app created at: $APP_DIR"

@@ -27,8 +27,17 @@ public final class Backlight {
 
     public init?() {
         // Find mac-brightnessctl in known locations
-        let paths = ["/opt/homebrew/bin/mac-brightnessctl",
-                     "/usr/local/bin/mac-brightnessctl"]
+        var paths = [
+            "/opt/homebrew/bin/mac-brightnessctl",
+            "/usr/local/bin/mac-brightnessctl"
+        ]
+        
+        // Check inside the running executable's folder first (e.g., keyflash.app/Contents/MacOS/)
+        if let execPath = Bundle.main.executablePath {
+            let execDir = (execPath as NSString).deletingLastPathComponent
+            paths.insert("\(execDir)/mac-brightnessctl", at: 0)
+        }
+        
         guard let path = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
             keyflashLog("Backlight: mac-brightnessctl not found")
             return nil
