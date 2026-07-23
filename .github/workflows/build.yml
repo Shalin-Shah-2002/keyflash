@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Select Xcode ${{ matrix.xcode }}
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
@@ -37,14 +37,14 @@ jobs:
           ./Scripts/build-dmg.sh
 
       - name: Upload DMG as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keyflash-dmg
           path: .build/release/keyflash.dmg
           if-no-files-found: error
 
       - name: Upload .app bundle (debug archive)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keyflash-app
           path: .build/release/keyflash.app
@@ -61,7 +61,7 @@ jobs:
 
     steps:
       - name: Download DMG artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: keyflash-dmg
 
