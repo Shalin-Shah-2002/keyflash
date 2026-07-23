@@ -11,6 +11,7 @@ public class PTYSpawn {
         public let exitCode: Int32
         public let taskCompleted: Bool
     }
+    
 
     public init() {}
 
