@@ -14,6 +14,7 @@ public struct KeyflashConfig: Codable {
     public var debugMode: Bool = false
 }
 
+
 /// Singleton config store backed by a YAML file at ~/.config/keyflash/config.yaml
 public class ConfigStore {
     public static let shared = ConfigStore()
