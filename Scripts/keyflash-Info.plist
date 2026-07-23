@@ -4,7 +4,17 @@
 <dict>
     <key>CFBundleExecutable</key>
     <string>keyflash</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.shah.keyflash</string>
+    <key>CFBundleName</key>
+    <string>keyflash</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>0.2</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.2</string>
+    <key>LSUIElement</key>
+    <true/>
 </dict>
 </plist>
