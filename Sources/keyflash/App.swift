@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreGraphics
 import KeyflashCore
 import OSLog
 
@@ -23,20 +24,51 @@ func log(_ msg: String) {
 }
 
 // ── Keyboard Backlight Flicker Controller ──
+//
+// Uses a Quartz Event Tap (CGEventTap) to detect keyboard and mouse input
+// system-wide. Unlike NSEvent.addGlobalMonitorForEvents, CGEventTap can
+// monitor keyDown events — NSEvent global monitors explicitly exclude them.
 
 class BacklightFlickerController {
     static let shared = BacklightFlickerController()
-    private var eventMonitor: Any?
     private var flashTask: Process?
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    // C callback for CGEventTap — receives the controller via the refcon pointer.
+    private static let eventTapCallback: @convention(c) (
+        CGEventTapProxy, CGEventType, CGEvent, UnsafeMutableRawPointer?
+    ) -> Unmanaged<CGEvent>? = { proxy, type, event, refcon in
+        guard let refcon else { return Unmanaged.passUnretained(event) }
+
+        // Re-enable tap if macOS disabled it due to timeout.
+        if type == .tapDisabledByTimeout {
+            let controller = Unmanaged<BacklightFlickerController>.fromOpaque(refcon).takeUnretainedValue()
+            if let tap = controller.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Ignore tap-disabled-by-user-input — that's a system event, not user input.
+        if type == .tapDisabledByUserInput {
+            return Unmanaged.passUnretained(event)
+        }
+
+        // All other monitored event types = user interaction → stop flash.
+        let controller = Unmanaged<BacklightFlickerController>.fromOpaque(refcon).takeUnretainedValue()
+        DispatchQueue.main.async {
+            controller.userDidInteract()
+        }
+        return Unmanaged.passUnretained(event)
+    }
 
     func flickerUntilInteraction() {
         log("BacklightFlicker: starting")
         flashTask?.terminate()
         flashTask = nil
-        eventMonitor = nil
+        removeEventTap()
 
-        // Use Backlight() from KeyflashCore to find mac-brightnessctl in all
-        // known locations (/opt/homebrew/bin, /usr/local/bin, etc.).
         guard let backlight = Backlight() else {
             log("BacklightFlicker: mac-brightnessctl not found, cannot flash")
             return
@@ -59,18 +91,61 @@ class BacklightFlickerController {
         } catch { return }
         log("BacklightFlicker: flash running")
 
-        let mask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
-            self?.userDidInteract()
+        installEventTap()
+    }
+
+    private func installEventTap() {
+        // Monitor all user-input events system-wide via Quartz Event Services.
+        // This catches keyboard keys AND mouse clicks/trackpad taps — unlike
+        // NSEvent global monitors, which explicitly exclude keyDown delivery.
+        let eventMask = (1 << CGEventType.keyDown.rawValue)
+                      | (1 << CGEventType.leftMouseDown.rawValue)
+                      | (1 << CGEventType.rightMouseDown.rawValue)
+                      | (1 << CGEventType.otherMouseDown.rawValue)
+                      | (1 << CGEventType.scrollWheel.rawValue)
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: Self.eventTapCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            log("BacklightFlicker: CGEventTap creation failed — add keyflash to "
+                + "System Settings > Privacy & Security > Accessibility.")
+            return
+        }
+
+        eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        log("BacklightFlicker: CGEvent tap installed")
+    }
+
+    private func removeEventTap() {
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
+        }
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+            eventTap = nil
         }
     }
 
     private func userDidInteract() {
-        log("BacklightFlicker: user interacted")
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-            eventMonitor = nil
-        }
+        log("BacklightFlicker: user interacted — stopping flash")
+        removeEventTap()
+        flashTask?.terminate()
+        flashTask = nil
+    }
+
+    deinit {
+        removeEventTap()
         flashTask?.terminate()
         flashTask = nil
     }
