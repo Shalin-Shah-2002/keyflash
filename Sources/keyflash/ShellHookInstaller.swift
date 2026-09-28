@@ -1,78 +1,116 @@
 import Foundation
+import KeyflashCore
 
-/// Installs shell aliases so `claude` and `opencode` are transparently
-/// wrapped by `keyflash-run`.
+/// Installs a shell alias so `aider` is transparently wrapped by `keyflash-run`.
+///
+/// Claude Code and OpenCode are *not* aliased any more: they report task
+/// completion exactly through `AgentHooks`, and running them under a PTY
+/// wrapper only adds risk. Installing removes any old keyflash block
+/// (including earlier `claude`/`opencode` aliases) from every rc file.
 public struct ShellHookInstaller {
-    /// Generates the hook with the correct full path to keyflash-run.
     private static func makeHookTemplate() -> String {
-        // Find keyflash-run relative to the running app
-        let runPath: String
-        if let executablePath = Bundle.main.executablePath {
-            let dir = (executablePath as NSString).deletingLastPathComponent
-            runPath = "\(dir)/keyflash-run"
-        } else {
-            // Fallback to /Applications
-            runPath = "/Applications/keyflash.app/Contents/MacOS/keyflash-run"
-        }
-
+        let quoted = shellQuote(AgentHooks.defaultRunPath())
         return """
 # >>> keyflash >>>
-# Auto-installed — wraps coding agents for keyboard backlight notifications.
-# To disable: comment out the lines below, or remove this block entirely.
-
-alias claude='\(runPath) -- claude'
-alias opencode='\(runPath) -- opencode'
-alias aider='\(runPath) -- aider'
+# Auto-installed — wraps aider for keyboard backlight notifications.
+# (Claude Code and OpenCode use native hooks and need no wrapper.)
+# To disable: remove this block entirely.
+if [ -x \(quoted) ]; then
+  function aider { \(quoted) -- aider "$@"; }
+fi
 # <<< keyflash <<<
 """
     }
 
-    /// Installs the hook. Idempotent: skips if already present with the same path.
-    public static func installIfNeeded() {
-        guard let rcPath = detectRcFile() else {
-            print("[keyflash] Could not detect shell rc file.")
-            return
-        }
-        let template = makeHookTemplate()
-
-        // Remove old hook block if present (from any previous install)
-        removeOldHook(from: rcPath)
-
-        // Append new hook
-        append(to: rcPath, content: template)
-        print("[keyflash] Shell hook installed → \(rcPath.path)")
+    private static func makeFishTemplate() -> String {
+        let runPath = AgentHooks.defaultRunPath()
+        let quoted = "'" + runPath.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'") + "'"
+        return """
+# >>> keyflash >>>
+# Auto-installed — wraps aider for keyboard backlight notifications.
+# (Claude Code and OpenCode use native hooks and need no wrapper.)
+if test -x \(quoted)
+  function aider; \(quoted) -- aider $argv; end
+end
+# <<< keyflash <<<
+"""
     }
 
-    private static func removeOldHook(from file: URL) {
+    /// Single-quotes a string for POSIX shells.
+    private static func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Installs the hook into the current shell's rc file, removing keyflash
+    /// blocks from every other rc file. Returns a human-readable status line.
+    @discardableResult
+    public static func installIfNeeded() -> String {
+        // Resolve symlinks so dotfiles-managed rc files stay symlinks.
+        let target = detectRcFile().resolvingSymlinksInPath()
+        for file in allRcFiles() where file.resolvingSymlinksInPath() != target {
+            removeOldHook(from: file)
+        }
+
+        let isFish = target.path.hasSuffix("config.fish")
+        let block = isFish ? makeFishTemplate() : makeHookTemplate()
+        let existing = (try? String(contentsOf: target, encoding: .utf8)) ?? ""
+        var content = stripHook(existing)
+        if !content.isEmpty && !content.hasSuffix("\n") { content += "\n" }
+        if !content.isEmpty { content += "\n" }
+        content += block + "\n"
+
+        if content == existing {
+            return "Shell hook already up to date → \(target.path)"
+        }
+        do {
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try content.write(to: target, atomically: true, encoding: .utf8)
+            return "Shell hook installed → \(target.path)"
+        } catch {
+            return "Shell hook FAILED → \(target.path): \(error.localizedDescription)"
+        }
+    }
+
+    /// Removes the keyflash block from a file, leaving every other line intact.
+    private static func removeOldHook(from link: URL) {
+        let file = link.resolvingSymlinksInPath()
         guard let content = try? String(contentsOf: file, encoding: .utf8) else { return }
-        let pattern = "(?s)\\n*# >>> keyflash >>>.*?# <<< keyflash <<<\\n*"
-        let cleaned = content.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
-        try? cleaned.write(to: file, atomically: true, encoding: .utf8)
-    }
-
-    private static func append(to file: URL, content: String) {
-        if let handle = try? FileHandle(forWritingTo: file) {
-            defer { try? handle.close() }
-            handle.seekToEndOfFile()
-            if let data = "\n\(content)\n".data(using: .utf8) {
-                handle.write(data)
-            }
-        } else {
-            try? "\(content)\n".write(to: file, atomically: true, encoding: .utf8)
+        let cleaned = stripHook(content)
+        if cleaned != content {
+            try? cleaned.write(to: file, atomically: true, encoding: .utf8)
         }
     }
 
-    private static func detectRcFile() -> URL? {
+    /// Removes whole lines from `# >>> keyflash >>>` through `# <<< keyflash <<<`
+    /// (plus one blank line directly above, which the installer adds). Never
+    /// joins the surrounding lines together.
+    static func stripHook(_ content: String) -> String {
+        let pattern = "(?ms)(^\\n)?^# >>> keyflash >>>.*?^# <<< keyflash <<<[^\\n]*(\\n|\\z)"
+        return content.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+    }
+
+    private static func allRcFiles() -> [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            home.appendingPathComponent(".zshrc"),
+            home.appendingPathComponent(".bashrc"),
+            home.appendingPathComponent(".bash_profile"),
+            home.appendingPathComponent(".config/fish/config.fish"),
+        ]
+    }
+
+    private static func detectRcFile() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        if shell.contains("zsh") { return home.appendingPathComponent(".zshrc") }
-        if shell.contains("bash") { return home.appendingPathComponent(".bashrc") }
+        // macOS terminals start bash as a login shell, which reads .bash_profile.
+        if shell.contains("bash") { return home.appendingPathComponent(".bash_profile") }
         if shell.contains("fish") { return home.appendingPathComponent(".config/fish/config.fish") }
         return home.appendingPathComponent(".zshrc")
     }
 
     public static func remove() {
-        guard let rcPath = detectRcFile() else { return }
-        removeOldHook(from: rcPath)
+        allRcFiles().forEach(removeOldHook(from:))
     }
 }

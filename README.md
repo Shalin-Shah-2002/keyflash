@@ -25,7 +25,7 @@
 
 ## ✨ Overview
 
-**keyflash** is a macOS menu bar app that flashes your MacBook's **keyboard backlight** whenever your AI coding agent finishes a task. It wraps the agent's CLI under a pseudo-terminal, intelligently detects when a response is complete, and triggers a continuous keyboard glow that pulses until you interact — so you never need to stare at a terminal waiting.
+**keyflash** is a macOS menu bar app that flashes your MacBook's **keyboard backlight** whenever your AI coding agent finishes a task. Claude Code and OpenCode tell keyflash *exactly* when they finish through their own hook systems (no output guessing), and keyflash triggers a continuous keyboard glow that pulses until you interact — so you never need to stare at a terminal waiting.
 
 Works with:
 
@@ -52,11 +52,13 @@ Works with:
 
 - 🚀 **Menu Bar App** — Lives in your menu bar, no dock icon, no distractions.
 - 🔦 **Keyboard Backlight Pulse** — Continuous flash until you interact (key press, mouse click, or scroll).
-- 🧠 **Smart Detection** — Watches for the prompt glyph (`❯`, `>` etc.) reappearing in the PTY output after real response content, using both an idle-gap heuristic and exact-prompt matching. Only fires after actual response output, never on startup, exit, or stray prompt markers.
-- 🔌 **PTY Wrapper** — Wraps agents under a pseudo-terminal, properly forwarding `SIGWINCH` and terminal size so TUI apps render correctly.
-- ⚙️ **Configurable** — Adjust pulse brightness, ramp-up/down speed, and enable/disable via a beautiful settings window.
+- 🎯 **Exact Detection** — Uses Claude Code's `Stop` / `Notification` hooks and an OpenCode plugin (`session.idle`, `permission.asked`, `question.asked`). It fires when the agent finishes its turn or is blocked waiting on you. It never fires for sub-agents, while you type, or on startup.
+- ♻️ **Self-Healing Hooks** — The app (re)installs the hooks on every launch, so they keep pointing at the right `keyflash-run` even after you move or update the app.
+- 💡 **Restores Your Brightness** — The backlight goes back to exactly the level you had before the flash.
+- 🛡️ **Always Stops** — Stops on key press, click or scroll (no special permission needed), from **Stop Flashing** in the menu, and after a 30-minute safety cap.
+- 🔌 **PTY Wrapper (aider)** — For agents without hooks, `keyflash-run -- aider` wraps the CLI under a pseudo-terminal and detects a finished response after you press Enter.
 - 🎨 **Liquid Glass UI** — Polished SwiftUI interface with orange accent theme.
-- 🛠️ **One-Click Shell Hook** — "Install Shell Hook" in the menu bar adds `alias` entries for `claude`, `opencode`, and `aider` that route through `keyflash-run`.
+- 🛠️ **One-Click Setup** — **Install Agent Hooks** in the menu bar sets up Claude Code, OpenCode and the `aider` wrapper.
 - 🔄 **Launch at Login** — Optionally auto-start the menu bar app on login via `SMAppService`.
 - 📝 **Debug Logging** — Everything logged to `/tmp/keyflash.log` for troubleshooting.
 
@@ -83,7 +85,7 @@ xcode-select --install
 **Step 2: Clone the repository**
 
 ```bash
-git clone https://github.com/YOUR_USER/keyflash.git
+git clone https://github.com/Shalin-Shah-2002/keyflash.git
 cd keyflash
 ```
 
@@ -130,34 +132,36 @@ After installation, run `keyflash.app`. You'll see a ⚡ lightning bolt icon in 
 
 > The app runs as an **accessory** (no dock icon) — it sits quietly in the menu bar.
 
-### 2️⃣ Install the Shell Hook
+### 2️⃣ Agent Hooks (automatic)
 
-Click the menu bar icon → **Install Shell Hook**. This adds these aliases to your `~/.zshrc`:
+On launch, keyflash installs completion hooks for you. You can also click the menu bar icon → **Install Agent Hooks**, or run:
 
 ```bash
-# >>> keyflash >>>
-alias claude='/Applications/keyflash.app/Contents/MacOS/keyflash-run -- claude'
-alias opencode='/Applications/keyflash.app/Contents/MacOS/keyflash-run -- opencode'
-alias aider='/Applications/keyflash.app/Contents/MacOS/keyflash-run -- aider'
-# <<< keyflash <<<
+/Applications/keyflash.app/Contents/MacOS/keyflash-run --install-hooks
 ```
 
-**Restart your terminal** (or run `source ~/.zshrc`).
+This sets up:
 
-> ⚠️ **TUI Note:** The old `keyflash-run` wrapper used subprocess spawning which broke TUI rendering. The current version uses `posix_spawnp()` with a real PTY and forwards `SIGWINCH` — so TUI apps like OpenCode and Claude Code fill your terminal correctly. If you still see a tiny TUI rendering, check [OPENCODE_TUI_FIX.md](OPENCODE_TUI_FIX.md) for known workarounds.
+| Agent | What gets installed | Flashes when |
+|---|---|---|
+| **Claude Code** | `Stop` + `Notification` hooks in `~/.claude/settings.json` (your other settings are preserved; the previous file is saved as `settings.json.keyflash-backup`) | Claude finishes its turn, or asks for permission / MCP input |
+| **OpenCode** | Plugin at `~/.config/opencode/plugins/keyflash.js` | The main session goes idle, or it asks for permission / asks you a question (sub-agent sessions are ignored) |
+| **aider** | `aider` shell function in your rc file that runs it through `keyflash-run` | A response finishes after you press Enter |
+
+**Restart any running `claude` / `opencode` sessions** so they load the hooks. You run them exactly as before, with no aliases needed. (Old `claude`/`opencode` aliases from earlier keyflash versions are removed when you click **Install Agent Hooks**. If you keep them, they're harmless.)
 
 ### 3️⃣ You're Done! 🎉
-
-Now whenever you use `claude`, `opencode`, or `aider`, the keyboard backlight will flash when a task completes.
 
 **Try it:**
 
 ```bash
 claude "Write a quick Python script"
-# ... Claude generates output ...
-# 💥 Keyboard backlight flashes continuously!
-# Press any key to stop the flash.
+# ... Claude works ...
+# 💥 Keyboard backlight flashes the moment Claude finishes!
+# Press any key, click or scroll to stop the flash.
 ```
+
+> The menu bar app must be running to flash. Turn on **Launch at Login** in Settings so it always is.
 
 ---
 
@@ -167,14 +171,10 @@ claude "Write a quick Python script"
 
 Click the menu bar icon → **Settings…** to open the configuration panel:
 
-![Settings UI](https://img.shields.io/badge/UI-Liquid%20Glass-orange)
-
 | Setting | Default | Description |
 |---|---|---|
-| **Enable Backlight Pulse** | On | Master toggle for the keyboard flash feature |
-| **Brightness** | 255 | Peak brightness during pulse (1–255) |
-| **Ramp Up** | 150 ms | Time to reach peak brightness |
-| **Ramp Down** | 150 ms | Time to fade back to normal |
+| **Flash when an agent finishes** | On | Master toggle for the keyboard flash |
+| **Install / Repair Agent Hooks** | — | Shows whether Claude Code / OpenCode hooks are installed and (re)installs them |
 | **Launch at Login** | Off | Auto-start keyflash when you log in |
 
 ### YAML Config File
@@ -215,46 +215,37 @@ All activity is logged to `/tmp/keyflash.log`. Check it for troubleshooting:
 tail -f /tmp/keyflash.log
 ```
 
-Enable `debugMode: true` in config for verbose prompt detection logging.
+Enable `debugMode: true` in config (or pass `--debug`) for verbose prompt detection logging in the `keyflash-run` wrapper.
+
+### Simulate an agent finishing
+
+```bash
+/Applications/keyflash.app/Contents/MacOS/keyflash-run --notify claude
+```
+
+This is exactly what the Claude Code / OpenCode hooks run.
 
 ---
 
 ## 🏗️ Architecture
 
-keyflash is composed of **three binaries** that work together:
-
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Terminal / Shell                       │
-│  $ claude "write a server"                               │
-│       │                                                  │
-│       ▼                                                  │
-│  keyflash-run -- claude "write a server"                 │
-│       │                                                  │
-│       ├── Spawns PTY (posix_spawnp)                      │
-│       ├── Forwards stdin/stdout/stderr ↔ child           │
-│       ├── Forwards SIGWINCH for TUI compatibility        │
-│       ├── Monitors output for silence → detects done     │
-│       │                                                  │
-│       └── On task complete ──────┐                       │
-│                                  │                       │
-│                                  ▼                       │
-│                  Unix Socket (/tmp/keyflash.sock)        │
-│                                  │                       │
-│                                  ▼                       │
-│  keyflash.app (menu bar) ◄───────┘                       │
-│       │                                                  │
-│       ▼                                                  │
-│  BacklightFlickerController                              │
-│       │                                                  │
-│       ▼                                                  │
-│  mac-brightnessctl -f 99999 0.4 200                      │
-│       │                                                  │
-│       ▼                                                  │
-│  🔦 Keyboard backlight flashes!                          │
-│       │                                                  │
-│       ◄── User presses key → flash stops                 │
-└─────────────────────────────────────────────────────────┘
+  Claude Code ── Stop / Notification hook ──┐
+  OpenCode ───── keyflash.js plugin ────────┤──▶ keyflash-run --notify <agent>
+  aider ──────── keyflash-run -- aider ─────┘          │
+                 (PTY wrapper, Enter + silence)         │
+                                                        ▼
+                                     Unix socket (/tmp/keyflash.sock)
+                                                        │
+                                                        ▼
+                                          keyflash.app (menu bar)
+                                                        │
+                           BacklightFlickerController ──┤
+                             • saves current brightness │
+                             • mac-brightnessctl -f …   ▼
+                                         🔦 keyboard backlight flashes
+                                                        │
+                   key / click / scroll ────────────────┘  stop + restore brightness
 ```
 
 ### Components
@@ -262,14 +253,15 @@ keyflash is composed of **three binaries** that work together:
 | Component | Language | Purpose |
 |---|---|---|
 | **keyflash** (app) | Swift / SwiftUI | Menu bar app — listens for events, shows settings UI, controls backlight flicker |
-| **keyflash-run** | Swift / C (POSIX) | PTY wrapper CLI — spawns AI agents, detects task completion, sends notification |
+| **keyflash-run** | Swift / C (POSIX) | `--notify` endpoint for agent hooks, `--install-hooks`, and a PTY wrapper for agents without hooks |
 | **mac-brightnessctl** | Objective-C | Low-level keyboard backlight control via private CoreBrightness APIs |
 
 ### Key Design Decisions
 
 - **Unix sockets** for IPC (not `DistributedNotificationCenter`) — reliable for unsigned apps on macOS 26+.
 - **PTY spawning** (`posix_openpt` + `posix_spawnp`) — proper TTY handling for TUI-based agents, with `poll()` I/O loop (not `select()`, which doesn't work well in Swift).
-- **Output-gated prompt detection** — Watches for the prompt glyph (`❯`, `>`, `$`, `%`) reappearing in output after real response text (letters/digits) has been emitted. Only fires after actual agent output between prompts, never on startup, shutdown, or stray markers.
+- **Native agent hooks over heuristics** — Claude Code and OpenCode already know exactly when a turn ends. Terminal-output guessing can't be made reliable (typing pauses, spinners, permission prompts), so it's only used as a fallback for aider.
+- **Two input detectors** — A Quartz event tap (instant, needs Input Monitoring) plus polling `CGEventSource` idle time (no permission). The flash always stops.
 - **Continuous flash** — keeps flashing until user interaction, so the signal works even when you're away from the desk.
 - **mac-brightnessctl** bundled inside `.app` — no external dependencies to install.
 
@@ -302,13 +294,14 @@ keyflash/
 │   │   ├── PulsePreview.swift # Animated pulse preview
 │   │   ├── NotificationService.swift  # Unix socket server for task events
 │   │   ├── LaunchAgentInstaller.swift  # Login item registration
-│   │   └── ShellHookInstaller.swift    # ~/.zshrc alias installer
+│   │   └── ShellHookInstaller.swift    # aider wrapper installer (rc file)
 │   ├── keyflash-run/          # PTY wrapper CLI
 │   │   ├── KeyflashRun.swift  # @main CLI (ArgumentParser)
 │   │   ├── PTYSpawn.swift     # PTY creation + posix_spawnp + poll I/O loop
-│   │   ├── PromptDetector.swift  # Silence-based task completion detection
+│   │   ├── PromptDetector.swift  # Enter + silence detection (fallback for aider)
 │   │   └── NotifyClient.swift    # Unix socket client
 │   └── KeyflashCore/          # Shared library
+│       ├── AgentHooks.swift   # Claude Code / OpenCode hook installer
 │       ├── Config.swift       # Config types + loader
 │       ├── Backlight.swift    # mac-brightnessctl wrapper
 │       └── Theme.swift        # Liquid Glass theme (colors, gradients, modifiers)
@@ -330,42 +323,35 @@ keyflash/
 
 ### 🔦 Keyboard doesn't flash
 
-1. **Check if your Mac has a keyboard backlight** — Older MacBook models may not. Test with the brightness keys (`F5`/`F6` on Intel, Touch Bar on newer models).
-2. **Check the app is running** — Look for the ⚡ icon in the menu bar.
-3. **Check the backlight tool** — Run `keyflash-run --test-pulse` to test directly.
-4. **Check logs** — `tail -f /tmp/keyflash.log` for error messages.
-5. **Enable debug mode** — Add `debugMode: true` to `~/.config/keyflash/config.yaml`.
+1. **Check the app is running.** Look for the ⚡ icon in the menu bar, and turn on **Launch at Login**.
+2. **Check the hooks.** Open Settings → **Agents** (both should say ✓), or run `keyflash-run --install-hooks`. Then **restart** your `claude` / `opencode` session.
+3. **Simulate a finish.** Run `keyflash-run --notify claude`. If this flashes, the hooks are the problem; if it doesn't, it's the app or the backlight.
+4. **Check the backlight tool.** Run `keyflash-run --test-pulse`, and check that your Mac has a keyboard backlight.
+5. **Check the logs.** Run `tail -f /tmp/keyflash.log`.
+
+### 🛑 Flash doesn't stop
+
+It stops on any key press, click or scroll. You can also use menu bar → **Stop Flashing**, and it stops by itself after 30 minutes. Your previous brightness is restored.
 
 ### 🪟 TUI renders in a tiny box
 
-If Claude Code or OpenCode renders in a tiny corner of the terminal:
+Claude Code and OpenCode no longer run through a wrapper, so this can't happen to them. If you still have old keyflash `alias claude=…` / `alias opencode=…` lines, click **Install Agent Hooks** to remove them, then open a new terminal.
 
-- This was caused by running through a non-PTY subprocess. The current `keyflash-run` uses `posix_spawnp()` with a proper PTY and should work correctly.
-- Restart your terminal or re-source your shell config after upgrading.
-- See [OPENCODE_TUI_FIX.md](OPENCODE_TUI_FIX.md) for detailed troubleshooting.
+### 🔌 Claude Code hook shows an error
 
-### 🔌 Shell hook not working
-
-Run the install again from the menu bar → **Install Shell Hook**, then:
-
-```bash
-source ~/.zshrc
-```
-
-To verify:
-
-```bash
-which claude
-# Should output: claude: aliased to /Applications/keyflash.app/Contents/MacOS/keyflash-run -- claude
-```
+If Claude Code reports a hook error, the app was probably moved. Launch it from its new location (it re-installs the hooks automatically), or run `keyflash-run --install-hooks` from there.
 
 ---
 
 ## 🔄 Uninstalling
 
-### Remove the shell hook
+### Remove the hooks
 
-Open `~/.zshrc` and delete the `# >>> keyflash >>>` / `# <<< keyflash <<<` block.
+```bash
+/Applications/keyflash.app/Contents/MacOS/keyflash-run --uninstall-hooks
+```
+
+Then delete the `# >>> keyflash >>>` / `# <<< keyflash <<<` block from your shell rc file (only present if you use the aider wrapper). Set `shouldAutoInstall: false` in the config to stop the app from re-adding hooks on launch.
 
 ### Remove the app
 

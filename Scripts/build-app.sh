@@ -54,4 +54,5 @@ fi
 
 echo ""
 echo "To run: open $APP_DIR"
-echo "To wrap: alias claude='$APP_DIR/Contents/MacOS/keyflash-run -- claude'"
+echo "Agent hooks (Claude Code / OpenCode) install automatically when the app launches,"
+echo "or run: $APP_DIR/Contents/MacOS/keyflash-run --install-hooks"

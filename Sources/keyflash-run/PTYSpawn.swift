@@ -41,11 +41,7 @@ public class PTYSpawn {
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
 
-        // Set the process group to the child's PID so it becomes a session leader
-        posix_spawnattr_setpgroup(&attr, 0) // 0 = use child PID as group
-        _ = posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
-
-        // Set the controlling terminal
+        // Run the child in its own session (setflags replaces, so set once).
         _ = posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
 
         // 5. Set up file actions: map slave → stdin/stdout/stderr
@@ -65,14 +61,13 @@ public class PTYSpawn {
         let argv: [UnsafeMutablePointer<CChar>?] = command.map { strdup($0) } + [nil]
         defer { argv.forEach { free($0) } }
 
-        var envBuilder: [String] = []
-        if let env = environment {
-            envBuilder = env.map { "\($0.key)=\($0.value)" }
+        // Pass the caller's full environment through (PATH, HOME, API keys, TERM,
+        // COLORTERM, ...). Only fall back to a TERM value if none is set.
+        var env = environment ?? ProcessInfo.processInfo.environment
+        if env["TERM"]?.isEmpty ?? true {
+            env["TERM"] = "xterm-256color"
         }
-        // Add TERM if not present
-        if environment?["TERM"] == nil {
-            envBuilder.append("TERM=xterm-256color")
-        }
+        let envBuilder = env.map { "\($0.key)=\($0.value)" }
         let envp: [UnsafeMutablePointer<CChar>?] = envBuilder.map { strdup($0) } + [nil]
         defer { envp.forEach { free($0) } }
 
@@ -108,6 +103,7 @@ public class PTYSpawn {
 
         let detector = PromptDetector(debug: debug)
         var childExited = false
+        var reaped = false
         var childStatus: Int32 = 0
         var lastDetectedAt: Date = .distantPast  // cooldown: don't re-fire within 1s
 
@@ -126,14 +122,21 @@ public class PTYSpawn {
         winchSource.resume()
         defer { winchSource.cancel() }
 
-        // Background stdin reader
+        // Background stdin reader (serial queue; PromptDetector is internally locked)
         var stdinBuf = [UInt8](repeating: 0, count: 4096)
-        let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO)
+        let stdinQueue = DispatchQueue(label: "keyflash.stdin")
+        let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: stdinQueue)
         stdinSource.setEventHandler {
             let n = read(STDIN_FILENO, &stdinBuf, stdinBuf.count)
             if n > 0 {
-                write(masterFd, stdinBuf, n)
-                detector.noteUserInput()
+                writeAll(masterFd, stdinBuf, n)
+                detector.noteUserInput(stdinBuf[0..<n])
+            } else if n == 0 || (errno != EINTR && errno != EAGAIN) {
+                // stdin closed (e.g. piped input ran out): forward EOF (^D) to the
+                // child and stop watching, otherwise this handler spins forever.
+                var eof: UInt8 = 0x04
+                _ = write(masterFd, &eof, 1)
+                stdinSource.cancel()
             }
         }
         stdinSource.resume()
@@ -150,10 +153,12 @@ public class PTYSpawn {
                 if (pfd.revents & Int16(POLLIN)) != 0 || (pfd.revents & Int16(POLLHUP)) != 0 {
                     let n = read(masterFd, &buf, buf.count)
                     if n > 0 {
-                        write(STDOUT_FILENO, buf, n)
+                        writeAll(STDOUT_FILENO, buf, n)
                         _ = detector.feed(Data(bytes: buf, count: n))
+                    } else if n < 0 && errno == EINTR {
+                        continue
                     } else {
-                        childExited = true  // EOF
+                        childExited = true  // EOF / EIO: child closed the terminal
                     }
                 }
             } else if ret == -1 {
@@ -171,42 +176,58 @@ public class PTYSpawn {
             }
 
             // Non-blocking child status check
-            var wstatus: Int32 = 0
-            if waitpid(childPid, &wstatus, WNOHANG) == childPid {
-                childStatus = wstatus
-                childExited = true
-            }
-        }
-
-        // If child still alive after main loop ends, drain remaining output
-        if !childDidExit(childStatus) {
-            var buf2 = [UInt8](repeating: 0, count: 65536)
-            var pfd2 = pollfd(fd: masterFd, events: Int16(POLLIN), revents: 0)
-            while true {
-                let s = poll(&pfd2, 1, 500)
-                if s > 0 {
-                    let n = read(masterFd, &buf2, buf2.count)
-                    if n > 0 { write(STDOUT_FILENO, buf2, n) } else { break }
-                }
+            if !reaped {
                 var wstatus: Int32 = 0
                 if waitpid(childPid, &wstatus, WNOHANG) == childPid {
                     childStatus = wstatus
-                    break
+                    reaped = true
+                    childExited = true
                 }
             }
         }
 
+        // Drain any output still buffered in the PTY (non-blocking).
+        var drainPfd = pollfd(fd: masterFd, events: Int16(POLLIN), revents: 0)
+        while poll(&drainPfd, 1, 0) > 0 {
+            let n = read(masterFd, &buf, buf.count)
+            if n > 0 { writeAll(STDOUT_FILENO, buf, n) } else { break }
+        }
+
+        // The PTY reaching EOF usually beats waitpid(WNOHANG); always collect the
+        // real exit status so the agent's exit code isn't lost.
+        if !reaped {
+            var wstatus: Int32 = 0
+            while waitpid(childPid, &wstatus, 0) == -1 && errno == EINTR {}
+            childStatus = wstatus
+        }
+
         close(masterFd)
-        let exitCode = (childStatus & 0xFF00) >> 8
+        let exitCode = Self.exitCode(fromWaitStatus: childStatus)
         let anyDetection = lastDetectedAt != .distantPast
         return (exitCode, anyDetection)
     }
 
-    private func childDidExit(_ status: Int32) -> Bool {
-        // WIFEXITED(x): ((x) & 0x7f) == 0
-        // WIFSIGNALED(x): ((x) & 0x7f) != 0 && ((x) & 0x7f) != 0x7f
-        let ws = status & 0x7f
-        return ws == 0 || (ws != 0 && ws != 0x7f)
+    /// Shell-style exit code: WEXITSTATUS for normal exits, 128+signal when killed.
+    static func exitCode(fromWaitStatus status: Int32) -> Int32 {
+        let low = status & 0x7f
+        if low == 0 { return (status >> 8) & 0xff }   // WIFEXITED
+        if low != 0x7f { return 128 + low }           // WIFSIGNALED
+        return 1
+    }
+}
+
+/// write(2) until every byte is written (handles partial writes and EINTR).
+private func writeAll(_ fd: Int32, _ bytes: UnsafeRawPointer, _ count: Int) {
+    var offset = 0
+    while offset < count {
+        let n = write(fd, bytes + offset, count - offset)
+        if n > 0 {
+            offset += n
+        } else if n < 0 && (errno == EINTR || errno == EAGAIN) {
+            continue
+        } else {
+            return
+        }
     }
 }
 

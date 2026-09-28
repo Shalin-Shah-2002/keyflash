@@ -42,12 +42,17 @@ struct KeyflashRun: ParsableCommand {
         commandName: "keyflash-run",
         abstract: "Wrap a coding-agent CLI and flash the keyboard backlight on task completion.",
         discussion: """
+        Claude Code and OpenCode report task completion themselves through hooks
+        (installed automatically by the menu bar app, or with --install-hooks), so
+        they don't need to be wrapped. Wrapping is for other agents such as aider.
+
         Examples:
-          keyflash-run -- claude
-          keyflash-run -- opencode
+          keyflash-run --install-hooks
+          keyflash-run --notify claude
+          keyflash-run -- aider
           keyflash-run --test-pulse
         """,
-        version: "0.1.0"
+        version: "0.3.0"
     )
 
     @Argument(help: "Command and arguments to wrap (e.g. \"claude\")")
@@ -59,7 +64,33 @@ struct KeyflashRun: ParsableCommand {
     @Flag(name: .long, help: "Debug logging for prompt detection")
     var debug = false
 
+    @Option(name: .long, help: "Tell the menu bar app that <agent> finished a task (used by agent hooks)")
+    var notify: String?
+
+    @Flag(name: .long, help: "Install Claude Code and OpenCode completion hooks")
+    var installHooks = false
+
+    @Flag(name: .long, help: "Remove the Claude Code and OpenCode completion hooks")
+    var uninstallHooks = false
+
     mutating func run() throws {
+        if let agent = notify {
+            // Called from agent hooks: must be fast, silent and never fail the agent.
+            notifyMenuBarApp(agent: agent.isEmpty ? "agent" : agent)
+            return
+        }
+
+        if installHooks {
+            AgentHooks.installAll().forEach { print($0) }
+            print("Restart any running claude/opencode sessions to pick up the hooks.")
+            return
+        }
+
+        if uninstallHooks {
+            AgentHooks.uninstallAll().forEach { print($0) }
+            return
+        }
+
         if testPulse {
             runTestPulse()
             return
@@ -85,29 +116,35 @@ struct KeyflashRun: ParsableCommand {
     private func runPTY() {
         let config = ConfigLoader.load()
         let agentName = URL(fileURLWithPath: commandArgs[0]).lastPathComponent
-        let pty = PTYSpawn()
-        let (exitCode, detected) = pty.run(
-            command: commandArgs,
-            debug: true,
-            onTaskComplete: { _ in
+
+        // Claude Code / OpenCode with keyflash hooks installed report completion
+        // exactly; running the output-silence heuristic too would double-fire.
+        let nativeAgent = AgentHooks.Agent(rawValue: agentName)
+        let useHeuristic = nativeAgent.map { !AgentHooks.isInstalled($0) } ?? true
+        if !useHeuristic {
+            writeLog("keyflash-run: \(agentName) has native keyflash hooks — passthrough only")
+        }
+
+        var onTaskComplete: PTYSpawn.TaskCompleteCallback?
+        if useHeuristic {
+            onTaskComplete = { _ in
                 guard config.enabled else { return }
                 writeLog("keyflash-run: mid-session task complete — notifying menu bar app (agent=\(agentName))")
                 notifyMenuBarApp(agent: agentName)
             }
+        }
+
+        let pty = PTYSpawn()
+        let (exitCode, detected) = pty.run(
+            command: commandArgs,
+            debug: debug || config.debugMode,
+            onTaskComplete: onTaskComplete
         )
 
         writeLog("keyflash-run: agent=\(agentName) exitCode=\(exitCode) detected=\(detected)")
 
-        guard config.enabled else {
-            writeLog("keyflash-run: config.enabled=false, skipping notification")
-            if exitCode != 0 { Darwin.exit(exitCode) }
-            return
-        }
-
-        // Mid-session detection handles all notifications when Claude Code is waiting for prompt.
-        // We do NOT send notification on process exit to avoid flashing when closing the app.
-
-        writeLog("keyflash-run: done")
+        // Mid-session detection handles all notifications while the agent waits for a prompt.
+        // We do NOT send a notification on process exit to avoid flashing when closing the agent.
 
         if exitCode != 0 {
             Darwin.exit(exitCode)

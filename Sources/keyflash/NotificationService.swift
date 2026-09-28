@@ -9,6 +9,9 @@ public class NotificationService: NSObject {
     private var socketFD: Int32 = -1
     private var source: DispatchSourceRead?
     private var isListening = false
+    /// Accepting/reading happens off the main thread so a slow or stuck client
+    /// can never freeze the menu bar app; the handler is called on main.
+    private let queue = DispatchQueue(label: "keyflash.notify-socket")
 
     public init(handler: @escaping (String, Int) -> Void) {
         self.handler = handler
@@ -26,6 +29,7 @@ public class NotificationService: NSObject {
         socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else {
             NSLog("NotificationService: failed to create socket")
+            isListening = false
             return
         }
 
@@ -46,6 +50,8 @@ public class NotificationService: NSObject {
         guard bindResult == 0 else {
             NSLog("NotificationService: failed to bind socket: \(String(cString: strerror(errno)))")
             close(socketFD)
+            socketFD = -1
+            isListening = false
             return
         }
 
@@ -53,11 +59,13 @@ public class NotificationService: NSObject {
         guard listen(socketFD, 5) == 0 else {
             NSLog("NotificationService: failed to listen on socket")
             close(socketFD)
+            socketFD = -1
+            isListening = false
             return
         }
 
         // Read incoming connections
-        let src = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: .main)
+        let src = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
         src.setEventHandler { [weak self] in
             self?.acceptConnection()
         }
@@ -70,6 +78,8 @@ public class NotificationService: NSObject {
     private func acceptConnection() {
         let clientFD = accept(socketFD, nil, nil)
         guard clientFD >= 0 else { return }
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        _ = setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         // Read a single message (newline-delimited)
         var buf: [UInt8] = [UInt8](repeating: 0, count: 4096)
         let n = read(clientFD, &buf, buf.count)
@@ -87,16 +97,23 @@ public class NotificationService: NSObject {
             if kv[0] == "pid" { pid = Int(kv[1]) ?? 0 }
         }
         NSLog("NotificationService: RECEIVED taskDone — agent=\(agent) pid=\(pid)")
-        handler(agent, pid)
+        let handler = self.handler
+        DispatchQueue.main.async { handler(agent, pid) }
     }
 
     public func stopListening() {
         guard isListening else { return }
         isListening = false
-        source?.cancel()
-        source = nil
-        if socketFD >= 0 { close(socketFD) }
+        let fd = socketFD
         socketFD = -1
+        if let source {
+            // Close the fd only after the source is fully cancelled.
+            source.setCancelHandler { if fd >= 0 { close(fd) } }
+            source.cancel()
+        } else if fd >= 0 {
+            close(fd)
+        }
+        source = nil
         unlink("/tmp/keyflash.sock")
     }
 

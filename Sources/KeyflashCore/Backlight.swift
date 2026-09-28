@@ -49,7 +49,41 @@ public final class Backlight {
     @discardableResult
     public func setBrightness(_ level: UInt16) -> Bool {
         let val = min(Float(level) / 255.0, 1.0)
-        return run(["\(val)"])
+        return setLevel(val)
+    }
+
+    /// Set keyboard backlight brightness as a fraction (0.0–1.0). Blocks until applied.
+    @discardableResult
+    public func setLevel(_ level: Float) -> Bool {
+        let clamped = max(0, min(level, 1))
+        return run([String(format: "%.3f", clamped)])
+    }
+
+    /// Current keyboard backlight brightness (0.0–1.0), or nil if it can't be read.
+    public func currentLevel() -> Float? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: binaryPath)
+        task.arguments = []
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            keyflashLog("Backlight: could not read brightness: \(error.localizedDescription)")
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        // Output: "Current brightness: 0.42"
+        let text = String(decoding: data, as: UTF8.self)
+        guard let valuePart = text.split(separator: ":").last,
+              let value = Float(valuePart.trimmingCharacters(in: .whitespacesAndNewlines)),
+              value.isFinite, value >= 0, value <= 1 else {
+            return nil
+        }
+        return value
     }
 
     /// Quick pulse: ON briefly, then OFF (restores original brightness).
@@ -58,21 +92,11 @@ public final class Backlight {
         _ = run(["-f", "2", "0.15", "100"])
     }
 
-    /// Flash continuously until killed.
-    public func flashContinuous() {
-        let task = Process()
-        task.launchPath = binaryPath
-        task.arguments = ["-f", "99999", "0.4", "200"]
-        try? task.run()
-        // Don't wait — caller manages lifecycle
-    }
-
-    /// Stop any running mac-brightnessctl instance.
-    public static func stopFlashing() {
-        let task = Process()
-        task.launchPath = "/usr/bin/pkill"
-        task.arguments = ["-f", "mac-brightnessctl.*-f"]
-        try? task.run()
+    /// Arguments that make `mac-brightnessctl` flash on/off for about `duration`
+    /// seconds (it restores the brightness it saw at start when it finishes).
+    public static func flashArguments(duration: TimeInterval, interval: Double = 0.4, fadeMs: Int = 200) -> [String] {
+        let cycles = max(1, Int(duration / (2 * interval)))
+        return ["-f", "\(cycles)", "\(interval)", "\(fadeMs)"]
     }
 
     // MARK: - Private
@@ -80,7 +104,7 @@ public final class Backlight {
     @discardableResult
     private func run(_ args: [String]) -> Bool {
         let task = Process()
-        task.launchPath = binaryPath
+        task.executableURL = URL(fileURLWithPath: binaryPath)
         task.arguments = args
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice

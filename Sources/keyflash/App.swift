@@ -25,27 +25,50 @@ func log(_ msg: String) {
 
 // ── Keyboard Backlight Flicker Controller ──
 //
-// Uses a Quartz Event Tap (CGEventTap) to detect keyboard and mouse input
-// system-wide. Unlike NSEvent.addGlobalMonitorForEvents, CGEventTap can
-// monitor keyDown events — NSEvent global monitors explicitly exclude them.
+// Flashes the keyboard backlight until the user presses a key, clicks or
+// scrolls, then restores the brightness they had before.
+//
+// Input is detected two ways so the flash always stops:
+//  1. A listen-only Quartz Event Tap (instant; needs Input Monitoring permission).
+//  2. Polling CGEventSource "seconds since last input" (no permission needed).
+// A safety cap ends the flash after `maxFlashDuration` even if both fail.
+//
+// All mac-brightnessctl process work runs on one serial queue, so starting a
+// new flash, stopping one, and restoring brightness can never interleave.
 
-class BacklightFlickerController {
+final class BacklightFlickerController {
     static let shared = BacklightFlickerController()
-    private var flashTask: Process?
+
+    /// The flash can never run longer than this.
+    private let maxFlashDuration: TimeInterval = 30 * 60
+
+    // Main-thread state
+    private(set) var isFlashing = false
+    private var flashStartedAt: Date?
+    private var generation = 0
+    private var inputPollTimer: Timer?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+
+    // Backlight-queue state (only touched on `hw`)
+    private let hw = DispatchQueue(label: "keyflash.backlight")
+    private var hwBacklight: Backlight?
+    private var hwFlashTask: Process?
+    private var hwSavedLevel: Float?
 
     // C callback for CGEventTap — receives the controller via the refcon pointer.
     private static let eventTapCallback: @convention(c) (
         CGEventTapProxy, CGEventType, CGEvent, UnsafeMutableRawPointer?
     ) -> Unmanaged<CGEvent>? = { proxy, type, event, refcon in
         guard let refcon else { return Unmanaged.passUnretained(event) }
+        let controller = Unmanaged<BacklightFlickerController>.fromOpaque(refcon).takeUnretainedValue()
 
         // Re-enable tap if macOS disabled it due to timeout.
         if type == .tapDisabledByTimeout {
-            let controller = Unmanaged<BacklightFlickerController>.fromOpaque(refcon).takeUnretainedValue()
-            if let tap = controller.eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
+            DispatchQueue.main.async {
+                if let tap = controller.eventTap {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
             }
             return Unmanaged.passUnretained(event)
         }
@@ -56,42 +79,140 @@ class BacklightFlickerController {
         }
 
         // All other monitored event types = user interaction → stop flash.
-        let controller = Unmanaged<BacklightFlickerController>.fromOpaque(refcon).takeUnretainedValue()
         DispatchQueue.main.async {
-            controller.userDidInteract()
+            controller.stop(reason: "user input (event tap)")
         }
         return Unmanaged.passUnretained(event)
     }
 
+    // MARK: - Public (main thread)
+
     func flickerUntilInteraction() {
         log("BacklightFlicker: starting")
-        flashTask?.terminate()
-        flashTask = nil
-        removeEventTap()
+        generation += 1
+        let gen = generation
+        isFlashing = true
+        flashStartedAt = Date()
+        startInputWatchers()
+        hw.async { self.hwStartFlash(generation: gen) }
+    }
 
-        guard let backlight = Backlight() else {
+    func stop(reason: String) {
+        guard isFlashing else { return }
+        log("BacklightFlicker: stopping — \(reason)")
+        isFlashing = false
+        flashStartedAt = nil
+        stopInputWatchers()
+        hw.async { self.hwStopFlash() }
+    }
+
+    /// Stops the flash and waits until brightness is restored (used at quit).
+    func stopAndWait() {
+        stop(reason: "app quitting")
+        hw.sync {}
+    }
+
+    func testFlicker() { log("BacklightFlicker: test"); flickerUntilInteraction() }
+
+    // MARK: - Backlight queue
+
+    private func hwStartFlash(generation gen: Int) {
+        guard let backlight = hwBacklight ?? Backlight() else {
             log("BacklightFlicker: mac-brightnessctl not found, cannot flash")
+            DispatchQueue.main.async { if self.generation == gen { self.stop(reason: "no backlight tool") } }
             return
+        }
+        hwBacklight = backlight
+
+        // Restarting while already flashing: stop the old flasher and put the
+        // user's brightness back first, so the new one sees (and later restores)
+        // the right level.
+        hwKillFlash()
+        if let saved = hwSavedLevel {
+            backlight.setLevel(saved)
+        } else {
+            hwSavedLevel = backlight.currentLevel() ?? 1.0
         }
 
         let task = Process()
-        task.launchPath = backlight.binaryPath
-        task.arguments = ["-f", "99999", "0.4", "200"]
-        task.terminationHandler = { [weak self] _ in
-            log("BacklightFlicker: flash exited, restoring brightness")
-            self?.flashTask = nil
-            let restore = Process()
-            restore.launchPath = backlight.binaryPath
-            restore.arguments = ["1"]
-            try? restore.run()
+        task.executableURL = URL(fileURLWithPath: backlight.binaryPath)
+        task.arguments = Backlight.flashArguments(duration: maxFlashDuration)
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        task.terminationHandler = { [weak self] finished in
+            self?.hw.async {
+                guard let self, self.hwFlashTask === finished else { return } // stopped on purpose
+                self.hwFlashTask = nil
+                log("BacklightFlicker: flash process ended by itself (status \(finished.terminationStatus))")
+                DispatchQueue.main.async {
+                    if self.generation == gen { self.stop(reason: "flash ended") }
+                }
+            }
         }
         do {
             try task.run()
-            flashTask = task
-        } catch { return }
-        log("BacklightFlicker: flash running")
+            hwFlashTask = task
+            log("BacklightFlicker: flash running (saved brightness \(hwSavedLevel ?? -1))")
+        } catch {
+            log("BacklightFlicker: failed to launch flash: \(error.localizedDescription)")
+            DispatchQueue.main.async { if self.generation == gen { self.stop(reason: "launch failed") } }
+        }
+    }
 
-        installEventTap()
+    private func hwKillFlash() {
+        guard let task = hwFlashTask else { return }
+        hwFlashTask = nil // before terminate, so its termination handler ignores it
+        if task.isRunning {
+            task.terminate()
+            // Let it exit and any in-flight fade finish before we set brightness.
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+    }
+
+    private func hwStopFlash() {
+        hwKillFlash()
+        if let backlight = hwBacklight, let saved = hwSavedLevel {
+            backlight.setLevel(saved)
+            log("BacklightFlicker: restored brightness \(saved)")
+        }
+        hwSavedLevel = nil
+    }
+
+    // MARK: - Input detection (main thread)
+
+    private func startInputWatchers() {
+        if eventTap == nil { installEventTap() }
+        if inputPollTimer == nil {
+            let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+                self?.pollForInput()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            inputPollTimer = timer
+        }
+    }
+
+    private func stopInputWatchers() {
+        inputPollTimer?.invalidate()
+        inputPollTimer = nil
+        removeEventTap()
+    }
+
+    private func pollForInput() {
+        guard isFlashing, let start = flashStartedAt else { return }
+        let elapsed = Date().timeIntervalSince(start)
+        if Self.secondsSinceLastUserInput() < elapsed - 0.05 {
+            stop(reason: "user input (idle poll)")
+        } else if elapsed > maxFlashDuration + 5 {
+            stop(reason: "safety timeout")
+        }
+    }
+
+    /// Seconds since the last key press, click or scroll. Needs no permissions.
+    static func secondsSinceLastUserInput() -> TimeInterval {
+        let types: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        return types
+            .map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }
+            .min() ?? .infinity
     }
 
     private func installEventTap() {
@@ -112,8 +233,7 @@ class BacklightFlickerController {
             callback: Self.eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            log("BacklightFlicker: CGEventTap creation failed — add keyflash to "
-                + "System Settings > Privacy & Security > Accessibility.")
+            log("BacklightFlicker: CGEventTap unavailable (no Input Monitoring permission) — using idle polling")
             return
         }
 
@@ -136,21 +256,6 @@ class BacklightFlickerController {
             eventTap = nil
         }
     }
-
-    private func userDidInteract() {
-        log("BacklightFlicker: user interacted — stopping flash")
-        removeEventTap()
-        flashTask?.terminate()
-        flashTask = nil
-    }
-
-    deinit {
-        removeEventTap()
-        flashTask?.terminate()
-        flashTask = nil
-    }
-
-    func testFlicker() { log("BacklightFlicker: test pulse"); flickerUntilInteraction() }
 }
 
 // ── AppDelegate ──
@@ -166,6 +271,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // fresh DMG install where macOS hasn't cached the app's activation policy.
         NSApp.setActivationPolicy(.accessory)
         startNotificationService()
+        autoInstallAgentHooks()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        BacklightFlickerController.shared.stopAndWait()
+        notificationService?.stopListening()
     }
 
     private func startNotificationService() {
@@ -177,24 +288,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         log("AppDelegate: NotificationService started")
     }
 
+    /// Keeps the Claude Code / OpenCode hooks installed and pointing at this
+    /// copy of keyflash-run (e.g. after the app is moved or updated).
+    private func autoInstallAgentHooks() {
+        guard ConfigLoader.load().shouldAutoInstall else { return }
+        guard Bundle.main.bundlePath.hasSuffix(".app") else {
+            log("AppDelegate: not running from an .app bundle — skipping hook auto-install")
+            return
+        }
+        DispatchQueue.global(qos: .utility).async {
+            for line in AgentHooks.installAll() {
+                log("AppDelegate: \(line)")
+            }
+        }
+    }
+
     func handleTaskComplete() {
         log("AppDelegate: handleTaskComplete")
         let config = ConfigLoader.load()
-        if config.enabled {
+        if config.enabled && config.backlightEnabled {
             BacklightFlickerController.shared.flickerUntilInteraction()
         }
     }
 
     @objc func testFlicker() { BacklightFlickerController.shared.testFlicker() }
 
+    @objc func stopFlashing() { BacklightFlickerController.shared.stop(reason: "menu") }
+
     @objc func openSettings() {
         log("AppDelegate: opening settings")
+        if let window = settingsWindowController?.window {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 500),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered, defer: false
         )
         window.title = "keyflash Settings"
+        window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: SettingsWindow())
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -202,10 +336,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindowController = NSWindowController(window: window)
     }
 
-    @objc func installHook() {
-        ShellHookInstaller.installIfNeeded()
+    @objc func installHooks() {
+        var lines = AgentHooks.installAll()
+        lines.append(ShellHookInstaller.installIfNeeded())
+        lines.forEach { log("AppDelegate: \($0)") }
+
         let alert = NSAlert()
-        alert.messageText = "Shell hook installed"
+        alert.messageText = "Agent hooks installed"
+        alert.informativeText = lines.joined(separator: "\n\n")
+            + "\n\nRestart any running claude / opencode sessions to pick them up."
+        NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
 }
@@ -228,11 +368,12 @@ struct KeyflashApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Text("keyflash v0.2")
+            Text("keyflash v0.3")
             Divider()
             Button("Test Flicker") { delegate.testFlicker() }
+            Button("Stop Flashing") { delegate.stopFlashing() }
             Button("Settings…") { delegate.openSettings() }
-            Button("Install Shell Hook") { delegate.installHook() }
+            Button("Install Agent Hooks") { delegate.installHooks() }
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
         } label: {
