@@ -45,11 +45,14 @@ cp "$PROJECT_DIR/Assets/KeyFlash_MenuIcon.png" "$APP_DIR/Contents/Resources/"
 # Copy Info.plist
 cp "$PROJECT_DIR/Scripts/keyflash-Info.plist" "$APP_DIR/Contents/Info.plist"
 
-# Sign with ad-hoc signature (required for macOS)
-codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash"
-codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash-run"
+# Sign with ad-hoc signature (required for macOS). Helpers first: signing the
+# main executable validates the other code in Contents/MacOS, and universal
+# (lipo'd) binaries aren't pre-signed by the linker.
 codesign --force --sign - "$APP_DIR/Contents/MacOS/mac-brightnessctl"
+codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash-run"
+codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash"
 codesign --force --sign - "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 
 echo "✅ keyflash.app created at: $APP_DIR"
 echo "   Binary          : $APP_DIR/Contents/MacOS/keyflash"
