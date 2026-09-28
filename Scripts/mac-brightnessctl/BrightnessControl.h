@@ -2,6 +2,7 @@
 
 @interface BrightnessControl : NSObject
 
++ (unsigned long long)keyboardID;
 + (void)setBrightness:(float)brightness;
 + (float)getBrightness;
 + (bool)isAutoBrightnessEnabled;

@@ -26,8 +26,12 @@ public class PromptDetector {
     /// echoing/redrawing that keystroke, not as the agent's response.
     private let echoWindow: TimeInterval = 0.25
 
-    public init(debug: Bool = false) {
+    private let now: () -> Date
+
+    /// - Parameter now: clock, injectable for tests.
+    public init(debug: Bool = false, now: @escaping () -> Date = Date.init) {
         self.debug = debug
+        self.now = now
     }
 
     /// Called with the bytes the user typed into STDIN.
@@ -36,24 +40,25 @@ public class PromptDetector {
     /// longer looks like "output followed by silence".
     public func noteUserInput<S: Sequence>(_ bytes: S) where S.Element == UInt8 {
         let submitted = bytes.contains { $0 == 0x0D || $0 == 0x0A }
+        let time = now()
         lock.lock()
-        lastInputTime = Date()
+        lastInputTime = time
         if submitted {
             awaitingResponse = true
             hasOutputSinceSubmit = false
         }
         lock.unlock()
-        if submitted && debug { writeLog("[PromptDetector] User submitted prompt (Enter)") }
+        if submitted && debug { keyflashLog("[PromptDetector] User submitted prompt (Enter)") }
     }
 
     /// Called whenever data is read from the PTY master (agent stdout/stderr).
     @discardableResult
     public func feed(_ data: Data) -> Bool {
         guard !data.isEmpty else { return false }
-        let now = Date()
+        let time = now()
         lock.lock()
-        lastOutputTime = now
-        if awaitingResponse && now.timeIntervalSince(lastInputTime) > echoWindow {
+        lastOutputTime = time
+        if awaitingResponse && time.timeIntervalSince(lastInputTime) > echoWindow {
             hasOutputSinceSubmit = true
         }
         lock.unlock()
@@ -68,7 +73,7 @@ public class PromptDetector {
             lock.unlock()
             return false
         }
-        let silence = Date().timeIntervalSince(lastOutputTime)
+        let silence = now().timeIntervalSince(lastOutputTime)
         let done = silence >= silenceThreshold
         if done {
             // Task complete! Reset state for the next prompt.
@@ -78,7 +83,7 @@ public class PromptDetector {
         lock.unlock()
 
         if done && debug {
-            writeLog("[PromptDetector] Response complete (\(String(format: "%.2f", silence))s silence after response output) — TASK COMPLETE")
+            keyflashLog("[PromptDetector] Response complete (\(String(format: "%.2f", silence))s silence after response output) — TASK COMPLETE")
         }
         return done
     }

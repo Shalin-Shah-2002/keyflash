@@ -1,21 +1,4 @@
 import Foundation
-import OSLog
-
-/// Shared debug logger for the KeyflashCore module (writes to /tmp/keyflash.log via POSIX).
-public func keyflashLog(_ msg: String) {
-    let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-    let line = "[\(ts)] \(msg)\n"
-    os_log(.debug, "keyflash: %{public}s", msg)
-    if let data = line.data(using: .utf8) {
-        let fd = open("/tmp/keyflash.log", O_WRONLY | O_CREAT | O_APPEND, 0o644)
-        if fd >= 0 {
-            data.withUnsafeBytes { buf in
-                _ = write(fd, buf.baseAddress, buf.count)
-            }
-            close(fd)
-        }
-    }
-}
 
 /// Controls the Mac keyboard backlight by shelling out to `mac-brightnessctl`.
 ///

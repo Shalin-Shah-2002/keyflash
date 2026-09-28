@@ -1,24 +1,11 @@
 import Foundation
-import Darwin
 import ArgumentParser
 import KeyflashCore
-import OSLog
-
-// Debug logging to /tmp/keyflash.log
-func writeLog(_ msg: String) {
-    let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-    let line = "[\(ts)] \(msg)\n"
-    os_log(.debug, "keyflash: %{public}s", msg)
-    if let data = line.data(using: .utf8) {
-        let fd = open("/tmp/keyflash.log", O_WRONLY | O_CREAT | O_APPEND, 0o644)
-        if fd >= 0 {
-            data.withUnsafeBytes { buf in
-                _ = write(fd, buf.baseAddress, buf.count)
-            }
-            close(fd)
-        }
-    }
-}
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// Sends a task-done event to the menu bar app, which triggers the
 /// highly-visible continuous backlight flicker (flashes until the user
@@ -27,7 +14,7 @@ func writeLog(_ msg: String) {
 /// This is the primary notification path. The direct Backlight.pulse() 2-flash
 /// was too subtle — the menu bar's flickerUntilInteraction() is the real signal.
 private func notifyMenuBarApp(agent: String) {
-    writeLog("notifyMenuBarApp: sending taskDone for agent=\(agent)")
+    keyflashLog("notifyMenuBarApp: sending taskDone for agent=\(agent)")
     NotifyClient.sendDone(agent: agent, pid: Int(ProcessInfo.processInfo.processIdentifier))
 }
 
@@ -38,6 +25,16 @@ private func notifyMenuBarApp(agent: String) {
 /// which then triggers the continuous keyboard backlight flicker.
 @main
 struct KeyflashRun: ParsableCommand {
+    /// PTY exec-helper mode (see `PTYSpawn.runExecHelper`) must be handled
+    /// before argument parsing: everything after the marker is the command.
+    static func main() {
+        let args = CommandLine.arguments
+        if args.count > 1 && args[1] == PTYSpawn.execHelperFlag {
+            PTYSpawn.runExecHelper(Array(args.dropFirst(2)))
+        }
+        self.main(nil)
+    }
+
     static let configuration = CommandConfiguration(
         commandName: "keyflash-run",
         abstract: "Wrap a coding-agent CLI and flash the keyboard backlight on task completion.",
@@ -107,7 +104,7 @@ struct KeyflashRun: ParsableCommand {
         print("🔦 Testing keyboard backlight pulse...")
         guard let backlight = Backlight() else {
             print("⚠️  Could not access keyboard backlight.")
-            Darwin.exit(1)
+            Foundation.exit(1)
         }
         backlight.pulse()
         print("✅ Pulse complete")
@@ -122,14 +119,14 @@ struct KeyflashRun: ParsableCommand {
         let nativeAgent = AgentHooks.Agent(rawValue: agentName)
         let useHeuristic = nativeAgent.map { !AgentHooks.isInstalled($0) } ?? true
         if !useHeuristic {
-            writeLog("keyflash-run: \(agentName) has native keyflash hooks — passthrough only")
+            keyflashLog("keyflash-run: \(agentName) has native keyflash hooks — passthrough only")
         }
 
         var onTaskComplete: PTYSpawn.TaskCompleteCallback?
         if useHeuristic {
             onTaskComplete = { _ in
                 guard config.enabled else { return }
-                writeLog("keyflash-run: mid-session task complete — notifying menu bar app (agent=\(agentName))")
+                keyflashLog("keyflash-run: mid-session task complete — notifying menu bar app (agent=\(agentName))")
                 notifyMenuBarApp(agent: agentName)
             }
         }
@@ -137,17 +134,18 @@ struct KeyflashRun: ParsableCommand {
         let pty = PTYSpawn()
         let (exitCode, detected) = pty.run(
             command: commandArgs,
+            execHelper: Bundle.main.executableURL?.resolvingSymlinksInPath().path,
             debug: debug || config.debugMode,
             onTaskComplete: onTaskComplete
         )
 
-        writeLog("keyflash-run: agent=\(agentName) exitCode=\(exitCode) detected=\(detected)")
+        keyflashLog("keyflash-run: agent=\(agentName) exitCode=\(exitCode) detected=\(detected)")
 
         // Mid-session detection handles all notifications while the agent waits for a prompt.
         // We do NOT send a notification on process exit to avoid flashing when closing the agent.
 
         if exitCode != 0 {
-            Darwin.exit(exitCode)
+            Foundation.exit(exitCode)
         }
     }
 }

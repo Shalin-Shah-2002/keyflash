@@ -28,7 +28,7 @@ public enum AgentHooks {
 
     // MARK: - Paths
 
-    static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
+    static var home: URL { KeyflashPaths.home }
 
     static var claudeSettingsURL: URL {
         home.appendingPathComponent(".claude/settings.json")

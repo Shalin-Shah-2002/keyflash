@@ -15,9 +15,8 @@ public class ConfigStore {
     private let configFile: URL
 
     private init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        configDir = home.appendingPathComponent(".config/keyflash")
-        configFile = configDir.appendingPathComponent("config.yaml")
+        configFile = KeyflashPaths.configFile
+        configDir = configFile.deletingLastPathComponent()
 
         if FileManager.default.fileExists(atPath: configFile.path) {
             config = ConfigLoader.load()

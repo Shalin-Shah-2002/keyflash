@@ -7,6 +7,9 @@
 
 void printUsage(void);
 
+// Non-zero when a command failed, so callers (keyflash) can tell.
+static int exitStatus = 0;
+
 void handleAutoBrightness(int argc, const char *argv[]);
 void handleSuspendIdleDimming(int argc, const char *argv[]);
 void handleIdleDimTime(int argc, const char *argv[]);
@@ -16,6 +19,10 @@ void handleFlashKeyboardLights(int argc, const char *argv[]);
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         [KeyboardManager configure];
+        if (KeyboardManager.brightnessClient == nil) {
+            fprintf(stderr, "Error: CoreBrightness KeyboardBrightnessClient is unavailable on this Mac\n");
+            return 2;
+        }
 
         if (argc == 1) {
             float currentBrightness = [BrightnessControl getBrightness];
@@ -46,7 +53,7 @@ int main(int argc, const char * argv[]) {
         }
     }
 
-    return 0;
+    return exitStatus;
 }
 
 void printUsage(void) {
@@ -80,6 +87,7 @@ void handleAutoBrightness(int argc, const char *argv[]) {
             [BrightnessControl enableAutoBrightness:autoValue != 0];
             printf("Auto-brightness set to: %s\n", (autoValue != 0) ? "Enabled" : "Disabled");
         } else {
+            exitStatus = 1;
             printf("Error: Invalid input for auto-brightness. Use '1' or '0'\n");
             printUsage();
         }
@@ -96,6 +104,7 @@ void handleSuspendIdleDimming(int argc, const char *argv[]) {
             [BrightnessControl setSuspendIdleDimming:suspendValue != 0];
             printf("Idle dimming %s\n", (suspendValue != 0) ? "Disabled" : "Enabled");
         } else {
+            exitStatus = 1;
             printf("Error: Invalid input for suspend idle dimming. Use '1' or '0'\n");
             printUsage();
         }
@@ -114,6 +123,7 @@ void handleIdleDimTime(int argc, const char *argv[]) {
             [BrightnessControl setIdleDimTime:dimTimeValue];
             printf("Idle dim time set to: %.2f seconds\n", dimTimeValue);
         } else {
+            exitStatus = 1;
             printf("Error: Invalid input for idle dim time. Please provide a valid non-negative number\n");
             printUsage();
         }
@@ -135,10 +145,12 @@ void handleSetBrightness(int argc, const char *argv[]) {
                 printf("Brightness set to: %.2f\n", brightnessValue);
             }
         } else {
+            exitStatus = 1;
             printf("Error: Invalid input. Please provide a valid number or '-option'\n");
             printUsage();
         }
     } else {
+        exitStatus = 1;
         printf("Error: Invalid number of arguments\n");
         printUsage();
     }
@@ -162,6 +174,7 @@ void handleFlashKeyboardLights(int argc, const char *argv[]) {
         }
     }
 
+    exitStatus = 1;
     printf("Error: Invalid arguments for flashing keyboard lights\n");
     printUsage();
 }

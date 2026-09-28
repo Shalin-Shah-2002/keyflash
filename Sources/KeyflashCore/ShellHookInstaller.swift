@@ -1,5 +1,4 @@
 import Foundation
-import KeyflashCore
 
 /// Installs a shell alias so `aider` is transparently wrapped by `keyflash-run`.
 ///
@@ -7,7 +6,7 @@ import KeyflashCore
 /// completion exactly through `AgentHooks`, and running them under a PTY
 /// wrapper only adds risk. Installing removes any old keyflash block
 /// (including earlier `claude`/`opencode` aliases) from every rc file.
-public struct ShellHookInstaller {
+public enum ShellHookInstaller {
     private static func makeHookTemplate() -> String {
         let quoted = shellQuote(AgentHooks.defaultRunPath())
         return """
@@ -45,9 +44,9 @@ end
     /// Installs the hook into the current shell's rc file, removing keyflash
     /// blocks from every other rc file. Returns a human-readable status line.
     @discardableResult
-    public static func installIfNeeded() -> String {
+    public static func installIfNeeded(shell: String? = nil) -> String {
         // Resolve symlinks so dotfiles-managed rc files stay symlinks.
-        let target = detectRcFile().resolvingSymlinksInPath()
+        let target = detectRcFile(shell: shell).resolvingSymlinksInPath()
         for file in allRcFiles() where file.resolvingSymlinksInPath() != target {
             removeOldHook(from: file)
         }
@@ -86,13 +85,13 @@ end
     /// Removes whole lines from `# >>> keyflash >>>` through `# <<< keyflash <<<`
     /// (plus one blank line directly above, which the installer adds). Never
     /// joins the surrounding lines together.
-    static func stripHook(_ content: String) -> String {
+    public static func stripHook(_ content: String) -> String {
         let pattern = "(?ms)(^\\n)?^# >>> keyflash >>>.*?^# <<< keyflash <<<[^\\n]*(\\n|\\z)"
         return content.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
     }
 
     private static func allRcFiles() -> [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let home = KeyflashPaths.home
         return [
             home.appendingPathComponent(".zshrc"),
             home.appendingPathComponent(".bashrc"),
@@ -101,9 +100,9 @@ end
         ]
     }
 
-    private static func detectRcFile() -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    private static func detectRcFile(shell: String?) -> URL {
+        let home = KeyflashPaths.home
+        let shell = shell ?? ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         // macOS terminals start bash as a login shell, which reads .bash_profile.
         if shell.contains("bash") { return home.appendingPathComponent(".bash_profile") }
         if shell.contains("fish") { return home.appendingPathComponent(".config/fish/config.fish") }

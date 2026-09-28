@@ -60,14 +60,14 @@ Works with:
 - 🎨 **Liquid Glass UI** — Polished SwiftUI interface with orange accent theme.
 - 🛠️ **One-Click Setup** — **Install Agent Hooks** in the menu bar sets up Claude Code, OpenCode and the `aider` wrapper.
 - 🔄 **Launch at Login** — Optionally auto-start the menu bar app on login via `SMAppService`.
-- 📝 **Debug Logging** — Everything logged to `/tmp/keyflash.log` for troubleshooting.
+- 📝 **Debug Logging** — Everything logged to `~/Library/Logs/keyflash.log` (rotated at 1 MB) for troubleshooting.
 
 ---
 
 ## 🖥️ Requirements
 
 - **macOS 14 (Sonoma)** or later
-- **Mac with a keyboard backlight** (MacBook Pro, MacBook Air, Magic Keyboard with backlight)
+- **MacBook with a backlit built-in keyboard** (MacBook Pro / MacBook Air; Apple Silicon or Intel)
 - **Xcode Command Line Tools** (for building from source)
 
 ---
@@ -112,6 +112,14 @@ Or move it to `/Applications`:
 ```bash
 cp -R .build/release/keyflash.app /Applications/
 open /Applications/keyflash.app
+```
+
+### ⬇️ Downloaded the DMG from Releases?
+
+The app is ad-hoc signed, not notarized, so macOS may say it "is damaged" or "can't be opened". After dragging it to Applications, run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/keyflash.app
 ```
 
 ### 📀 Build a DMG (Optional)
@@ -209,10 +217,10 @@ keyflash-run --test-pulse
 
 ### Debug logging
 
-All activity is logged to `/tmp/keyflash.log`. Check it for troubleshooting:
+All activity is logged to `~/Library/Logs/keyflash.log`. Check it for troubleshooting:
 
 ```bash
-tail -f /tmp/keyflash.log
+tail -f ~/Library/Logs/keyflash.log
 ```
 
 Enable `debugMode: true` in config (or pass `--debug`) for verbose prompt detection logging in the `keyflash-run` wrapper.
@@ -235,7 +243,7 @@ This is exactly what the Claude Code / OpenCode hooks run.
   aider ──────── keyflash-run -- aider ─────┘          │
                  (PTY wrapper, Enter + silence)         │
                                                         ▼
-                                     Unix socket (/tmp/keyflash.sock)
+                                     Unix socket (~/Library/Application Support/keyflash/keyflash.sock, 0600)
                                                         │
                                                         ▼
                                           keyflash.app (menu bar)
@@ -258,8 +266,8 @@ This is exactly what the Claude Code / OpenCode hooks run.
 
 ### Key Design Decisions
 
-- **Unix sockets** for IPC (not `DistributedNotificationCenter`) — reliable for unsigned apps on macOS 26+.
-- **PTY spawning** (`posix_openpt` + `posix_spawnp`) — proper TTY handling for TUI-based agents, with `poll()` I/O loop (not `select()`, which doesn't work well in Swift).
+- **Unix sockets** for IPC (not `DistributedNotificationCenter`) — reliable for unsigned apps on macOS 26+. The socket and log live in your home directory (not shared `/tmp`), so other local users can't hijack or read them.
+- **PTY spawning** (`posix_openpt` + `posix_spawn`) — the wrapped agent gets a real controlling terminal (via a tiny exec helper doing `setsid` + `TIOCSCTTY`), so Ctrl-C and git/ssh/sudo prompts work; your environment and exit code pass through untouched.
 - **Native agent hooks over heuristics** — Claude Code and OpenCode already know exactly when a turn ends. Terminal-output guessing can't be made reliable (typing pauses, spinners, permission prompts), so it's only used as a fallback for aider.
 - **Two input detectors** — A Quartz event tap (instant, needs Input Monitoring) plus polling `CGEventSource` idle time (no permission). The flash always stops.
 - **Continuous flash** — keeps flashing until user interaction, so the signal works even when you're away from the desk.
@@ -280,6 +288,14 @@ This is exactly what the Claude Code / OpenCode hooks run.
 ./Scripts/build-app.sh debug
 ```
 
+### Run the Tests
+
+```bash
+swift test
+```
+
+The core (`KeyflashCore`) and `keyflash-run` are plain Foundation/POSIX code, so the tests also run on Linux (`docker run --rm -v "$PWD":/src -w /src swift:6.0-noble swift test`). CI runs them on macOS and Linux.
+
 ### Project Structure
 
 ```
@@ -287,33 +303,29 @@ keyflash/
 ├── Assets/                    # App icon and media assets
 ├── Package.swift              # Swift Package Manager manifest
 ├── Sources/
-│   ├── keyflash/              # Menu bar app
+│   ├── keyflash/              # Menu bar app (macOS only)
 │   │   ├── App.swift          # @main SwiftUI app, AppDelegate, BacklightFlickerController
-│   │   ├── Config.swift       # YAML-backed config store
+│   │   ├── Config.swift       # ConfigStore (writes config.yaml)
 │   │   ├── SettingsWindow.swift  # Settings UI (SwiftUI)
 │   │   ├── PulsePreview.swift # Animated pulse preview
-│   │   ├── NotificationService.swift  # Unix socket server for task events
-│   │   ├── LaunchAgentInstaller.swift  # Login item registration
-│   │   └── ShellHookInstaller.swift    # aider wrapper installer (rc file)
-│   ├── keyflash-run/          # PTY wrapper CLI
-│   │   ├── KeyflashRun.swift  # @main CLI (ArgumentParser)
-│   │   ├── PTYSpawn.swift     # PTY creation + posix_spawnp + poll I/O loop
-│   │   ├── PromptDetector.swift  # Enter + silence detection (fallback for aider)
-│   │   └── NotifyClient.swift    # Unix socket client
-│   └── KeyflashCore/          # Shared library
+│   │   ├── Theme.swift        # Liquid Glass theme (colors, gradients, modifiers)
+│   │   └── LaunchAgentInstaller.swift  # Login item (SMAppService)
+│   ├── keyflash-run/          # CLI: --notify, --install-hooks, PTY wrapper
+│   │   └── KeyflashRun.swift
+│   └── KeyflashCore/          # Shared, Foundation-only library
 │       ├── AgentHooks.swift   # Claude Code / OpenCode hook installer
-│       ├── Config.swift       # Config types + loader
+│       ├── NotifySocket.swift # Unix socket client + server
+│       ├── PTYSpawn.swift     # PTY + posix_spawn + poll I/O loop
+│       ├── PromptDetector.swift  # Enter + silence detection (fallback for aider)
+│       ├── ShellHookInstaller.swift  # aider wrapper installer (rc file)
 │       ├── Backlight.swift    # mac-brightnessctl wrapper
-│       └── Theme.swift        # Liquid Glass theme (colors, gradients, modifiers)
+│       ├── Config.swift       # Config types + loader
+│       └── Log.swift          # Paths + logging
+├── Tests/KeyflashCoreTests/   # XCTest suite (macOS + Linux)
 ├── Scripts/
-│   ├── build-app.sh           # Builds .app bundle
+│   ├── build-app.sh           # Builds universal .app bundle
 │   ├── build-dmg.sh           # Builds .dmg disk image
 │   ├── mac-brightnessctl/     # Objective-C backlight control tool
-│   │   ├── main.m             # CLI entry point
-│   │   ├── BrightnessControl.{h,m}
-│   │   ├── KeyboardBrightnessClient.h
-│   │   ├── KeyboardManager.{h,m}
-│   │   └── Makefile
 │   └── keyflash-Info.plist
 ```
 
@@ -327,7 +339,7 @@ keyflash/
 2. **Check the hooks.** Open Settings → **Agents** (both should say ✓), or run `keyflash-run --install-hooks`. Then **restart** your `claude` / `opencode` session.
 3. **Simulate a finish.** Run `keyflash-run --notify claude`. If this flashes, the hooks are the problem; if it doesn't, it's the app or the backlight.
 4. **Check the backlight tool.** Run `keyflash-run --test-pulse`, and check that your Mac has a keyboard backlight.
-5. **Check the logs.** Run `tail -f /tmp/keyflash.log`.
+5. **Check the logs.** Run `tail -f ~/Library/Logs/keyflash.log`.
 
 ### 🛑 Flash doesn't stop
 
@@ -336,6 +348,8 @@ It stops on any key press, click or scroll. You can also use menu bar → **Stop
 ### 🪟 TUI renders in a tiny box
 
 Claude Code and OpenCode no longer run through a wrapper, so this can't happen to them. If you still have old keyflash `alias claude=…` / `alias opencode=…` lines, click **Install Agent Hooks** to remove them, then open a new terminal.
+
+For the `aider` wrapper, the terminal size is copied at start and on every resize (`SIGWINCH`).
 
 ### 🔌 Claude Code hook shows an error
 

@@ -2,25 +2,12 @@ import SwiftUI
 import AppKit
 import CoreGraphics
 import KeyflashCore
-import OSLog
 
 // ── Debug logging ──
 
-private let logFile = "/tmp/keyflash.log"
-
+/// App-wide logging (~/Library/Logs/keyflash.log + unified log).
 func log(_ msg: String) {
-    let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-    let line = "[\(ts)] \(msg)\n"
-    os_log(.debug, "keyflash: %{public}s", msg)
-    if let data = line.data(using: .utf8) {
-        let fd = open(logFile, O_WRONLY | O_CREAT | O_APPEND, 0o644)
-        if fd >= 0 {
-            data.withUnsafeBytes { buf in
-                _ = write(fd, buf.baseAddress, buf.count)
-            }
-            close(fd)
-        }
-    }
+    keyflashLog(msg)
 }
 
 // ── Keyboard Backlight Flicker Controller ──
@@ -261,7 +248,7 @@ final class BacklightFlickerController {
 // ── AppDelegate ──
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var notificationService: NotificationService?
+    var notifyServer: NotifyServer?
     var settingsWindowController: NSWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -276,16 +263,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         BacklightFlickerController.shared.stopAndWait()
-        notificationService?.stopListening()
+        notifyServer?.stop()
     }
 
     private func startNotificationService() {
-        notificationService = NotificationService { [weak self] agent, pid in
+        let server = NotifyServer { [weak self] agent, pid in
             log("AppDelegate: received task done — agent=\(agent) pid=\(pid)")
             self?.handleTaskComplete()
         }
-        notificationService?.startListening()
-        log("AppDelegate: NotificationService started")
+        if !server.start() {
+            let alert = NSAlert()
+            alert.messageText = "keyflash can't receive notifications"
+            alert.informativeText = "Could not open \(KeyflashPaths.socketPath). See \(KeyflashPaths.logFile.path)."
+            alert.runModal()
+        }
+        notifyServer = server
     }
 
     /// Keeps the Claude Code / OpenCode hooks installed and pointing at this
@@ -360,6 +352,9 @@ private let menuBarIcon: NSImage = {
     return image
 }()
 
+private let appVersion =
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+
 // ── SwiftUI Menu Bar App ──
 
 @main
@@ -368,7 +363,7 @@ struct KeyflashApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Text("keyflash v0.3")
+            Text("keyflash v\(appVersion)")
             Divider()
             Button("Test Flicker") { delegate.testFlicker() }
             Button("Stop Flashing") { delegate.stopFlashing() }
