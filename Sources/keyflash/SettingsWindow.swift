@@ -5,11 +5,10 @@ import KeyflashCore
 ///
 /// Accessible from the menu bar icon → "Settings…"
 struct SettingsWindow: View {
-    @AppStorage("backlightEnabled") private var backlightEnabled = true
-    @AppStorage("pulseBrightness") private var pulseBrightness: Double = 255
-    @AppStorage("pulseRampUpMs") private var pulseRampUpMs: Double = 150
-    @AppStorage("pulseRampDownMs") private var pulseRampDownMs: Double = 150
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
+    // Backed by ~/.config/keyflash/config.yaml (the file the app actually reads).
+    @State private var backlightEnabled = ConfigLoader.load().backlightEnabled
+    @State private var launchAtLogin = LaunchAgentManager.isRegistered
+    @State private var hooksStatus = SettingsWindow.currentHooksStatus()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,21 +36,38 @@ struct SettingsWindow: View {
 
                     // Backlight Settings
                     settingsSection("Keyboard Backlight") {
-                        Toggle("Enable Backlight Pulse", isOn: $backlightEnabled)
+                        Toggle("Flash when an agent finishes", isOn: $backlightEnabled)
                             .toggleStyle(SwitchToggleStyle(tint: Color.keyflashOrange))
+                            .onChange(of: backlightEnabled) { _, newValue in
+                                ConfigStore.shared.update { $0.backlightEnabled = newValue }
+                            }
+                    }
 
-                        VStack(alignment: .leading) {
-                            sliderRow("Brightness", value: $pulseBrightness, range: 1...255, suffix: "")
-                            sliderRow("Ramp Up", value: $pulseRampUpMs, range: 50...500, suffix: "ms")
-                            sliderRow("Ramp Down", value: $pulseRampDownMs, range: 50...500, suffix: "ms")
+                    // Agents
+                    settingsSection("Agents") {
+                        Text(hooksStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Button("Install / Repair Agent Hooks") {
+                            AgentHooks.installAll().forEach { log("Settings: \($0)") }
+                            hooksStatus = SettingsWindow.currentHooksStatus()
                         }
-                        .padding(.leading, 4)
+                        .buttonStyle(.bordered)
+                        .tint(Color.keyflashOrange)
                     }
 
                     // General
                     settingsSection("General") {
                         Toggle("Launch at Login", isOn: $launchAtLogin)
                             .toggleStyle(SwitchToggleStyle(tint: Color.keyflashOrange))
+                            .onChange(of: launchAtLogin) { _, newValue in
+                                if newValue {
+                                    LaunchAgentManager.register()
+                                } else {
+                                    LaunchAgentManager.unregister()
+                                }
+                                ConfigStore.shared.update { $0.launchAtLogin = newValue }
+                            }
                     }
                 }
                 .padding(.vertical)
@@ -78,18 +94,11 @@ struct SettingsWindow: View {
         .padding(.horizontal)
     }
 
-    private func sliderRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, suffix: String) -> some View {
-        HStack {
-            Text(label)
-                .font(.subheadline)
-                .frame(width: 90, alignment: .leading)
-            Slider(value: value, in: range)
-                .tint(Color.keyflashOrange)
-            Text("\(Int(value.wrappedValue))\(suffix)")
-                .font(.caption.monospacedDigit())
-                .frame(width: 60, alignment: .trailing)
-                .foregroundColor(.secondary)
+    private static func currentHooksStatus() -> String {
+        func mark(_ agent: AgentHooks.Agent) -> String {
+            AgentHooks.isInstalled(agent) ? "✓ installed" : "✗ not installed"
         }
+        return "Claude Code: \(mark(.claude))    OpenCode: \(mark(.opencode))"
     }
 }
 

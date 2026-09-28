@@ -1,57 +1,69 @@
 #!/bin/bash
 # Build script for keyflash.app
 # Usage: ./Scripts/build-app.sh [debug|release]
+#
+# Release builds are universal (Apple Silicon + Intel); debug builds are for
+# the host architecture only.
 
 set -euo pipefail
 
 BUILD_MODE="${1:-release}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$PROJECT_DIR/.build/$BUILD_MODE"
-APP_DIR="$BUILD_DIR/keyflash.app"
+APP_DIR="$PROJECT_DIR/.build/$BUILD_MODE/keyflash.app"
+
+if [ "$BUILD_MODE" = "release" ]; then
+    SWIFT_ARGS=(-c release --arch arm64 --arch x86_64)
+    MAKE_ARCHS="-arch arm64 -arch x86_64"
+else
+    SWIFT_ARGS=(-c debug)
+    MAKE_ARCHS="-arch $(uname -m)"
+fi
 
 echo "🏗️  Building keyflash ($BUILD_MODE)..."
-swift build -c "$BUILD_MODE"
+cd "$PROJECT_DIR"
+swift build "${SWIFT_ARGS[@]}"
+BIN_DIR="$(swift build "${SWIFT_ARGS[@]}" --show-bin-path)"
 
 echo "📦 Creating keyflash.app bundle..."
-
-# Create .app directory structure
-mkdir -p "$APP_DIR/Contents/MacOS"
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 # Compile mac-brightnessctl from source
 echo "🔨 Compiling mac-brightnessctl..."
 make -C "$PROJECT_DIR/Scripts/mac-brightnessctl" clean
-make -C "$PROJECT_DIR/Scripts/mac-brightnessctl"
+make -C "$PROJECT_DIR/Scripts/mac-brightnessctl" ARCHS="$MAKE_ARCHS"
 
 # Copy binaries
-cp "$BUILD_DIR/keyflash" "$APP_DIR/Contents/MacOS/keyflash"
-cp "$BUILD_DIR/keyflash-run" "$APP_DIR/Contents/MacOS/keyflash-run"
+cp "$BIN_DIR/keyflash" "$APP_DIR/Contents/MacOS/keyflash"
+cp "$BIN_DIR/keyflash-run" "$APP_DIR/Contents/MacOS/keyflash-run"
 cp "$PROJECT_DIR/Scripts/mac-brightnessctl/mac-brightnessctl" "$APP_DIR/Contents/MacOS/mac-brightnessctl"
 
-# Create Resources directory and copy app icon
-mkdir -p "$APP_DIR/Contents/Resources"
+# App icon + menu bar icon
 cp "$PROJECT_DIR/Assets/KeyFlash_Logo.icns" "$APP_DIR/Contents/Resources/"
 cp "$PROJECT_DIR/Assets/KeyFlash_MenuIcon.png" "$APP_DIR/Contents/Resources/"
 
 # Copy Info.plist
 cp "$PROJECT_DIR/Scripts/keyflash-Info.plist" "$APP_DIR/Contents/Info.plist"
 
-# Sign with ad-hoc signature (required for macOS)
-codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash"
-codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash-run"
+# Sign with ad-hoc signature (required for macOS). Helpers first: signing the
+# main executable validates the other code in Contents/MacOS, and universal
+# (lipo'd) binaries aren't pre-signed by the linker.
 codesign --force --sign - "$APP_DIR/Contents/MacOS/mac-brightnessctl"
+codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash-run"
+codesign --force --sign - "$APP_DIR/Contents/MacOS/keyflash"
 codesign --force --sign - "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 
 echo "✅ keyflash.app created at: $APP_DIR"
 echo "   Binary          : $APP_DIR/Contents/MacOS/keyflash"
-echo "   PTY wrapper CLI : $APP_DIR/Contents/MacOS/keyflash-run"
+echo "   Helper CLI      : $APP_DIR/Contents/MacOS/keyflash-run"
+lipo -info "$APP_DIR/Contents/MacOS/keyflash" "$APP_DIR/Contents/MacOS/mac-brightnessctl" || true
 echo ""
 
 # Register with Launch Services so `open` finds the latest version
-if [ -d "$APP_DIR" ]; then
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_DIR" 2>/dev/null || true
-    echo "📝 Registered with Launch Services"
-fi
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_DIR" 2>/dev/null || true
 
 echo ""
 echo "To run: open $APP_DIR"
-echo "To wrap: alias claude='$APP_DIR/Contents/MacOS/keyflash-run -- claude'"
+echo "Agent hooks (Claude Code / OpenCode) install automatically when the app launches,"
+echo "or run: $APP_DIR/Contents/MacOS/keyflash-run --install-hooks"

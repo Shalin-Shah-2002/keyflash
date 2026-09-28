@@ -1,5 +1,4 @@
 import Foundation
-import IOKit
 import Yams
 
 /// User-facing configuration for keyflash.
@@ -20,8 +19,7 @@ public struct KeyflashConfig: Codable {
 /// Loads config from disk (used by both the app and the CLI)
 public struct ConfigLoader {
     public static func load() -> KeyflashConfig {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configFile = home.appendingPathComponent(".config/keyflash/config.yaml")
+        let configFile = KeyflashPaths.configFile
 
         guard let data = try? Data(contentsOf: configFile),
               let yaml = try? Yams.load(yaml: String(decoding: data, as: UTF8.self)),

@@ -20,3 +20,10 @@ Assets/KeyFlash_Logo.iconset/
 
 # Local scripts and documentation
 AI_CONTEXT.md
+
+# SwiftPM / Xcode per-user state
+.swiftpm/
+xcuserdata/
+
+# Build output
+Scripts/mac-brightnessctl/mac-brightnessctl

@@ -7,12 +7,26 @@ on:
       - "v*.*.*"
   pull_request:
     branches: ["main"]
+  workflow_dispatch:
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Core logic + keyflash-run are plain Foundation/POSIX and are tested on
+  # Linux too (the menu bar app is macOS-only and excluded there).
+  test-linux:
+    name: Tests (Linux)
+    runs-on: ubuntu-24.04
+    container: swift:6.0-noble
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run tests
+        run: swift test < /dev/null
+
   build:
     name: Build keyflash.dmg
     runs-on: macos-15
@@ -26,6 +40,9 @@ jobs:
 
       - name: Show Swift version
         run: swift --version
+
+      - name: Run tests
+        run: swift test < /dev/null
 
       - name: Build app bundle
         run: |
@@ -78,7 +95,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "keyflash build #${{ github.run_number }} ($SHA_SHORT)" \
             --notes-file release-notes.md \
-            --latest \
+            --prerelease \
             .build/release/keyflash.dmg
 
       # ── Versioned release on tag push ──
