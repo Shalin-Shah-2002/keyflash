@@ -136,7 +136,7 @@ public class PTYSpawn {
         close(slaveFd)
 
         guard spawnErr == 0 else {
-            fputs("keyflash-run: cannot run \(command[0]): \(String(cString: strerror(spawnErr)))\n", stderr)
+            fputs("keyflash-run: cannot run \(fullArgv[0]): \(String(cString: strerror(spawnErr)))\n", stderr)
             close(masterFd)
             return (127, false)
         }
@@ -150,6 +150,7 @@ public class PTYSpawn {
         var reaped = false
         var childStatus: Int32 = 0
         var lastDetectedAt: Date = .distantPast  // cooldown: don't re-fire within 1s
+        var terminationForwardedAt: Date?        // when we relayed TERM/HUP to the child
 
         // Signal handling (self-pipe): forward window-size changes to the PTY,
         // and relay termination signals to the child so it exits cleanly — our
@@ -158,35 +159,32 @@ public class PTYSpawn {
         let signals = SignalPipe(watching: [SIGWINCH, SIGTERM, SIGHUP, SIGINT, SIGQUIT])
         defer { signals?.restore() }
 
-        // Background stdin reader (serial queue; PromptDetector is internally locked)
-        var stdinBuf = [UInt8](repeating: 0, count: 4096)
-        let stdinQueue = DispatchQueue(label: "keyflash.stdin")
-        let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: stdinQueue)
-        stdinSource.setEventHandler {
-            let n = read(STDIN_FILENO, &stdinBuf, stdinBuf.count)
-            if n > 0 {
-                writeAll(masterFd, stdinBuf, n)
-                detector.noteUserInput(stdinBuf[0..<n])
-            } else if n == 0 || (errno != EINTR && errno != EAGAIN) {
-                // stdin closed (e.g. piped input ran out): forward EOF (^D) to the
-                // child and stop watching, otherwise this handler spins forever.
-                var eof: UInt8 = 0x04
-                _ = write(masterFd, &eof, 1)
-                stdinSource.cancel()
-            }
-        }
-        stdinSource.resume()
-        defer { stdinSource.cancel() }
+        // Everything is multiplexed in one poll() loop: PTY output, our stdin,
+        // and pending signals. (A dispatch/epoll source can't watch /dev/null or a
+        // redirected file on Linux, and poll() needs no extra threads or locks.)
+        // The master is non-blocking so a child that isn't reading its input can
+        // never stop us from draining its output.
+        _ = fcntl(masterFd, F_SETFL, fcntl(masterFd, F_GETFL) | O_NONBLOCK)
 
-        // Main read loop using poll(): PTY output + pending signals
         var buf = [UInt8](repeating: 0, count: 65536)
-        var pfds = [
-            pollfd(fd: masterFd, events: Int16(POLLIN), revents: 0),
-            pollfd(fd: signals?.readFD ?? -1, events: Int16(POLLIN), revents: 0),
-        ]
+        var pendingInput: [UInt8] = []      // typed/piped bytes not yet accepted by the child
+        var stdinOpen = true
+        var eofSent = 0                     // ^D bytes sent after stdin closed
+        var lastEOFSentAt: Date = .distantPast
 
         while !childExited {
+            var pfds = [
+                pollfd(fd: masterFd, events: Int16(POLLIN) | (pendingInput.isEmpty ? 0 : Int16(POLLOUT)), revents: 0),
+                pollfd(fd: signals?.readFD ?? -1, events: Int16(POLLIN), revents: 0),
+                // Backpressure: don't read more input while the child is behind.
+                pollfd(fd: (stdinOpen && pendingInput.isEmpty) ? STDIN_FILENO : -1, events: Int16(POLLIN), revents: 0),
+            ]
             let ret = poll(&pfds, nfds_t(pfds.count), 100)  // 100ms timeout
+
+            if ret == -1 {
+                if errno == EINTR { continue }
+                break
+            }
 
             if ret > 0 && (pfds[1].revents & Int16(POLLIN)) != 0, let signals {
                 for sig in signals.drain() {
@@ -194,10 +192,45 @@ public class PTYSpawn {
                         Self.copyWindowSize(to: masterFd)
                     } else {
                         kill(childPid, sig)
+                        if sig == SIGTERM || sig == SIGHUP, terminationForwardedAt == nil {
+                            terminationForwardedAt = Date()
+                        }
                     }
                 }
             }
 
+            // Our stdin → child (readable also covers EOF and hangup).
+            if ret > 0 && pfds[2].revents != 0 {
+                let n = read(STDIN_FILENO, &buf, 4096)
+                if n > 0 {
+                    pendingInput += buf[0..<n]
+                    detector.noteUserInput(buf[0..<n])
+                } else if n == 0 || (errno != EINTR && errno != EAGAIN) {
+                    stdinOpen = false   // closed (e.g. piped input ran out)
+                }
+            }
+            flushInput(to: masterFd, pending: &pendingInput)
+
+            // Forward stdin EOF as ^D once all input is delivered. A single ^D can be
+            // lost if it arrives before the child is reading (or while it holds a
+            // partial line), which would leave it waiting forever, so repeat it a
+            // few times while the child is alive.
+            if !stdinOpen, pendingInput.isEmpty, eofSent < 6, !reaped,
+               eofSent == 0 || Date().timeIntervalSince(lastEOFSentAt) >= 1 {
+                var eof: UInt8 = 0x04
+                _ = write(masterFd, &eof, 1)
+                eofSent += 1
+                lastEOFSentAt = Date()
+            }
+
+            // We were asked to quit (or our terminal closed) but the agent is
+            // ignoring the signal: don't linger forever after the terminal is gone.
+            if let asked = terminationForwardedAt, !reaped, Date().timeIntervalSince(asked) > 10 {
+                kill(childPid, SIGKILL)
+                terminationForwardedAt = nil
+            }
+
+            // Child → our stdout
             if ret > 0 {
                 let revents = pfds[0].revents
                 if (revents & Int16(POLLIN)) != 0 || (revents & Int16(POLLHUP)) != 0 {
@@ -205,15 +238,12 @@ public class PTYSpawn {
                     if n > 0 {
                         writeAll(STDOUT_FILENO, buf, n)
                         _ = detector.feed(Data(bytes: buf, count: n))
-                    } else if n < 0 && errno == EINTR {
-                        continue
+                    } else if n < 0 && (errno == EINTR || errno == EAGAIN) {
+                        // nothing to read right now
                     } else {
                         childExited = true  // EOF / EIO: child closed the terminal
                     }
                 }
-            } else if ret == -1 {
-                if errno == EINTR { continue }
-                childExited = true
             }
 
             // Check if response completed and went silent
@@ -339,6 +369,20 @@ private func writeAll(_ fd: Int32, _ bytes: UnsafeRawPointer, _ count: Int) {
             continue
         } else {
             return
+        }
+    }
+}
+
+/// Writes as much pending input as the (non-blocking) PTY master accepts now.
+private func flushInput(to masterFd: Int32, pending: inout [UInt8]) {
+    while !pending.isEmpty {
+        let n = pending.withUnsafeBytes { write(masterFd, $0.baseAddress, $0.count) }
+        if n > 0 {
+            pending.removeFirst(n)
+        } else if n < 0 && errno == EINTR {
+            continue
+        } else {
+            return  // EAGAIN (child is behind) or the child is gone: try again later
         }
     }
 }

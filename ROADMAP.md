@@ -1,5 +1,7 @@
 # keyflash roadmap: smart alerts
 
+> **Status: implemented** (both features below). See the README for usage.
+
 Two features that build on the native Claude Code / OpenCode hooks:
 
 1. **Different alerts for different events**
@@ -13,13 +15,13 @@ Today every event produces the same flash. The agents already tell us *why* they
 |---|---|---|
 | Task finished | Claude `Stop`, OpenCode `session.idle` | Slow, steady pulse |
 | Needs you (permission / question) | Claude `Notification`, OpenCode `permission.asked` / `question.asked` | Fast, urgent blink |
-| Error | OpenCode `session.error` | Double pulse, repeating |
+| Error | OpenCode `session.error` (not Esc-aborts, not sub-agents) | Rapid strobe |
 
 ### Design
 - `keyflash-run --notify <agent> [--event done|attention|error]` (default `done`, so existing hooks keep working).
 - Socket message becomes `agent=<name> pid=<pid> event=<event>`. `NotifyServer.parse` treats a missing `event` as `done`.
 - The OpenCode plugin passes the event; the Claude hooks pass `--event done` (Stop) and `--event attention` (Notification).
-- `Backlight.flashArguments` takes a pattern (interval and fade) per event.
+- `Backlight.flashArguments` takes a pattern (interval and fade) per event. `mac-brightnessctl -f` only does uniform on/off cycles, so "error" is a rapid strobe rather than a double pulse.
 - A pending "attention" flash is never downgraded by a later "done".
 
 ### Tests

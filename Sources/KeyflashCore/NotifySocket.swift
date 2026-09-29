@@ -9,7 +9,21 @@ import Glibc
 // menu bar app (server) over a per-user Unix domain socket, because
 // `DistributedNotificationCenter` is unreliable for unsigned apps on macOS 26.
 //
-// Wire format: one line, "agent=<name> pid=<pid>\n".
+// Wire format: one line, "agent=<name> pid=<pid> event=<done|attention|error>\n".
+// `event` is optional (missing/unknown means `done`) so old hooks keep working.
+
+/// One task-completion / attention message from an agent hook.
+public struct NotifyMessage: Equatable {
+    public let agent: String
+    public let pid: Int
+    public let event: AlertEvent
+
+    public init(agent: String, pid: Int, event: AlertEvent = .done) {
+        self.agent = agent
+        self.pid = pid
+        self.event = event
+    }
+}
 
 private func makeUnixAddress(_ path: String) -> sockaddr_un? {
     var addr = sockaddr_un()
@@ -36,12 +50,18 @@ private let streamSocketType = SOCK_STREAM
 private let streamSocketType = Int32(SOCK_STREAM.rawValue)
 #endif
 
+/// The `send(2)` system call (the `NotifyClient.send` method would shadow it).
+private func rawSend(_ fd: Int32, _ buf: UnsafeRawPointer?, _ len: Int, _ flags: Int32) -> Int {
+    send(fd, buf, len, flags)
+}
+
 /// Client side, used by `keyflash-run --notify` (called from agent hooks).
 public enum NotifyClient {
-    /// Sends one task-done message. Returns false if the app isn't reachable.
+    /// Sends one message. Returns false if the app isn't reachable.
     /// Never blocks for long and never raises SIGPIPE.
     @discardableResult
-    public static func sendDone(agent: String, pid: Int, socketPath: String = KeyflashPaths.socketPath) -> Bool {
+    public static func send(agent: String, pid: Int, event: AlertEvent = .done,
+                            socketPath: String = KeyflashPaths.socketPath) -> Bool {
         let fd = socket(AF_UNIX, streamSocketType, 0)
         guard fd >= 0 else {
             keyflashLog("NotifyClient: failed to create socket: \(String(cString: strerror(errno)))")
@@ -64,14 +84,14 @@ public enum NotifyClient {
         }
 
         let safeAgent = agent.filter { !$0.isWhitespace && $0 != "=" }
-        let bytes = Array("agent=\(safeAgent.isEmpty ? "agent" : safeAgent) pid=\(pid)\n".utf8)
+        let bytes = Array("agent=\(safeAgent.isEmpty ? "agent" : safeAgent) pid=\(pid) event=\(event.rawValue)\n".utf8)
         #if canImport(Darwin)
         let flags: Int32 = 0
         #else
         let flags = Int32(MSG_NOSIGNAL)
         #endif
-        let sent = bytes.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, flags) }
-        keyflashLog("NotifyClient: sent taskDone agent=\(safeAgent) (\(sent) bytes)")
+        let sent = bytes.withUnsafeBytes { rawSend(fd, $0.baseAddress, $0.count, flags) }
+        keyflashLog("NotifyClient: sent \(event.rawValue) agent=\(safeAgent) (\(sent) bytes)")
         return sent == bytes.count
     }
 }
@@ -80,16 +100,15 @@ public enum NotifyClient {
 /// queue so a slow or stuck client can never freeze the UI; `handler` is
 /// called on `handlerQueue` (main by default).
 public final class NotifyServer {
-    private let handler: (String, Int) -> Void
+    private let handler: (NotifyMessage) -> Void
     private let handlerQueue: DispatchQueue
     private let socketPath: String
     private let queue = DispatchQueue(label: "keyflash.notify-socket")
-    private var socketFD: Int32 = -1
     private var source: DispatchSourceRead?
 
     public init(socketPath: String = KeyflashPaths.socketPath,
                 handlerQueue: DispatchQueue = .main,
-                handler: @escaping (_ agent: String, _ pid: Int) -> Void) {
+                handler: @escaping (NotifyMessage) -> Void) {
         self.socketPath = socketPath
         self.handlerQueue = handlerQueue
         self.handler = handler
@@ -103,9 +122,18 @@ public final class NotifyServer {
         guard source == nil else { return true }
         if socketPath == KeyflashPaths.socketPath { KeyflashPaths.ensureSocketDirectory() }
 
-        // Remove a stale socket left by a previous run (only if it is a socket).
+        // A socket file may be left over from a crash (safe to replace) or belong
+        // to another running keyflash (must not be stolen).
         var st = stat()
-        if lstat(socketPath, &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK {
+        if lstat(socketPath, &st) == 0 {
+            guard (st.st_mode & S_IFMT) == S_IFSOCK else {
+                keyflashLog("NotifyServer: \(socketPath) exists and is not a socket; leaving it alone")
+                return false
+            }
+            if NotifyServer.isLive(socketPath) {
+                keyflashLog("NotifyServer: another keyflash is already listening on \(socketPath)")
+                return false
+            }
             unlink(socketPath)
         }
 
@@ -133,7 +161,6 @@ public final class NotifyServer {
             return false
         }
 
-        socketFD = fd
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         src.setEventHandler { [weak self] in self?.acceptConnection(listenFD: fd) }
         src.setCancelHandler { close(fd) }
@@ -146,7 +173,6 @@ public final class NotifyServer {
     public func stop() {
         guard let src = source else { return }
         source = nil
-        socketFD = -1
         src.cancel()
         unlink(socketPath)
     }
@@ -160,27 +186,44 @@ public final class NotifyServer {
         var timeout = timeval(tv_sec: 1, tv_usec: 0)
         _ = setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-        var buf = [UInt8](repeating: 0, count: 1024)
-        let n = read(clientFD, &buf, buf.count)
-        guard n > 0, let (agent, pid) = NotifyServer.parse(Array(buf.prefix(n))) else { return }
-        keyflashLog("NotifyServer: received taskDone agent=\(agent) pid=\(pid)")
+        // One newline-terminated line (a stream socket may deliver it in pieces).
+        var data: [UInt8] = []
+        var buf = [UInt8](repeating: 0, count: 256)
+        while data.count < 1024 && !data.contains(0x0A) {
+            let n = read(clientFD, &buf, buf.count)
+            if n <= 0 { break }
+            data += buf[0..<n]
+        }
+        guard !data.isEmpty, let message = NotifyServer.parse(data) else { return }
+        keyflashLog("NotifyServer: received \(message.event.rawValue) agent=\(message.agent) pid=\(message.pid)")
         let handler = self.handler
-        handlerQueue.async { handler(agent, pid) }
+        handlerQueue.async { handler(message) }
     }
 
-    /// Parses "agent=<name> pid=<pid>". Returns nil for anything else.
-    static func parse(_ bytes: [UInt8]) -> (String, Int)? {
+    /// True if something is accepting connections on the socket.
+    static func isLive(_ path: String) -> Bool {
+        let fd = socket(AF_UNIX, streamSocketType, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        guard var addr = makeUnixAddress(path) else { return false }
+        return withSockaddr(&addr) { connect(fd, $0, $1) } == 0
+    }
+
+    /// Parses "agent=<name> pid=<pid> [event=<event>]". Returns nil for anything else.
+    static func parse(_ bytes: [UInt8]) -> NotifyMessage? {
         guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }
         let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
         var agent: String?
         var pid = 0
+        var event: String?
         for part in line.split(separator: " ") {
             let kv = part.split(separator: "=", maxSplits: 1)
             guard kv.count == 2 else { continue }
             if kv[0] == "agent" { agent = String(kv[1]) }
             if kv[0] == "pid" { pid = Int(kv[1]) ?? 0 }
+            if kv[0] == "event" { event = String(kv[1]) }
         }
         guard let agent, !agent.isEmpty else { return nil }
-        return (agent, pid)
+        return NotifyMessage(agent: agent, pid: pid, event: AlertEvent(wire: event))
     }
 }

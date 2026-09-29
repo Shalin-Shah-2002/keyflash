@@ -64,7 +64,7 @@ private let maxLogBytes: off_t = 1_000_000
 /// Shared debug logger: unified logging plus ~/Library/Logs/keyflash.log.
 public func keyflashLog(_ msg: String) {
     #if canImport(Darwin)
-    os_log(.debug, "keyflash: %{public}s", msg)
+    os_log(.debug, "keyflash: %{public}@", msg)
     #endif
 
     let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
@@ -87,4 +87,14 @@ public func keyflashLog(_ msg: String) {
     defer { close(fd) }
     let bytes = Array(line.utf8)
     _ = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+}
+
+/// Writes `data` atomically to `url` while keeping the existing file's permission
+/// bits (config files such as ~/.claude/settings.json or a shell rc file can hold
+/// secrets and are often 0600). A newly created file is private (0600).
+func writePreservingMode(_ data: Data, to url: URL) throws {
+    let fm = FileManager.default
+    let mode = (try? fm.attributesOfItem(atPath: url.path))?[.posixPermissions] as? NSNumber
+    try data.write(to: url, options: .atomic)
+    try fm.setAttributes([.posixPermissions: mode ?? NSNumber(value: 0o600)], ofItemAtPath: url.path)
 }

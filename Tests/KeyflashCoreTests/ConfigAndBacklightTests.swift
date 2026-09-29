@@ -8,6 +8,30 @@ final class ConfigAndBacklightTests: SandboxedTestCase {
         XCTAssertTrue(config.enabled)
         XCTAssertTrue(config.backlightEnabled)
         XCTAssertTrue(config.shouldAutoInstall)
+        XCTAssertTrue(config.suppressWhenWatching)
+        XCTAssertEqual(config.watchingIdleSeconds, 10)
+        XCTAssertEqual(config.terminalBundleIds, KeyflashConfig.defaultTerminalBundleIds)
+    }
+
+    func testLoadsWatchingSettings() throws {
+        try write("""
+        suppressWhenWatching: false
+        watchingIdleSeconds: 25
+        terminalBundleIds:
+          - com.example.Term
+          - com.jetbrains.*
+        """, to: ".config/keyflash/config.yaml")
+        let config = ConfigLoader.load()
+        XCTAssertFalse(config.suppressWhenWatching)
+        XCTAssertEqual(config.watchingIdleSeconds, 25)
+        XCTAssertEqual(config.terminalBundleIds, ["com.example.Term", "com.jetbrains.*"])
+    }
+
+    func testWatchingWindowIsClamped() throws {
+        try write("watchingIdleSeconds: -5\n", to: ".config/keyflash/config.yaml")
+        XCTAssertEqual(ConfigLoader.load().watchingIdleSeconds, 0)
+        try write("watchingIdleSeconds: 999999\n", to: ".config/keyflash/config.yaml")
+        XCTAssertEqual(ConfigLoader.load().watchingIdleSeconds, 3600)
     }
 
     func testLoadsValues() throws {
@@ -23,6 +47,15 @@ final class ConfigAndBacklightTests: SandboxedTestCase {
     func testFlashArgumentsCoverRequestedDuration() {
         XCTAssertEqual(Backlight.flashArguments(duration: 1800), ["-f", "2250", "0.4", "200"])
         XCTAssertEqual(Backlight.flashArguments(duration: 0), ["-f", "1", "0.4", "200"])
+    }
+
+    func testFlashArgumentsSurviveDegenerateInput() {
+        // A zero interval used to trap converting infinity to Int.
+        let args = Backlight.flashArguments(duration: 60, interval: 0, fadeMs: -5)
+        XCTAssertEqual(args[0], "-f")
+        XCTAssertGreaterThan(Int(args[1])!, 0)
+        XCTAssertGreaterThan(Double(args[2])!, 0)
+        XCTAssertEqual(args[3], "0")
     }
 
     func testLogWritesToUserLogAndRotates() throws {

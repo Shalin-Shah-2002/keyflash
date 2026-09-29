@@ -13,6 +13,29 @@ public struct KeyflashConfig: Codable {
     public var shouldAutoInstall: Bool = true
     public var debugMode: Bool = false
 
+    /// Stay quiet when a terminal/editor is frontmost and you were recently active.
+    public var suppressWhenWatching: Bool = true
+    /// How recent your last key press / click must be to count as "watching".
+    public var watchingIdleSeconds: Int = 10
+    /// Apps that count as "the agent's terminal". Entries ending in `*` match by prefix.
+    public var terminalBundleIds: [String] = KeyflashConfig.defaultTerminalBundleIds
+
+    public static let defaultTerminalBundleIds: [String] = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "com.github.wez.wezterm",
+        "dev.warp.Warp-Stable",
+        "co.zeit.hyper",
+        "com.microsoft.VSCode",
+        "com.microsoft.VSCodeInsiders",
+        "com.todesktop.230313mzl4w4u92", // Cursor
+        "dev.zed.Zed",
+        "com.jetbrains.*",
+    ]
+
     public init() {}
 }
 
@@ -37,6 +60,11 @@ public struct ConfigLoader {
         config.launchAtLogin = dict["launchAtLogin"] as? Bool ?? false
         config.shouldAutoInstall = dict["shouldAutoInstall"] as? Bool ?? true
         config.debugMode = dict["debugMode"] as? Bool ?? false
+        config.suppressWhenWatching = dict["suppressWhenWatching"] as? Bool ?? true
+        config.watchingIdleSeconds = min(max(dict["watchingIdleSeconds"] as? Int ?? 10, 0), 3600)
+        if let ids = dict["terminalBundleIds"] as? [Any] {
+            config.terminalBundleIds = ids.compactMap { $0 as? String }
+        }
         return config
     }
 }

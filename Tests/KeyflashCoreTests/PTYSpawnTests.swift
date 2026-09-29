@@ -4,6 +4,21 @@ import XCTest
 
 final class PTYSpawnTests: XCTestCase {
     private var helper: String { productsDirectory.appendingPathComponent("keyflash-run").path }
+    private var savedStdin: Int32 = -1
+
+    // Give every test a stdin that is at EOF (like CI), so results never depend
+    // on the developer's terminal: an interactive stdin would make `cat` wait forever.
+    override func setUp() {
+        savedStdin = dup(STDIN_FILENO)
+        let devNull = open("/dev/null", O_RDONLY)
+        dup2(devNull, STDIN_FILENO)
+        close(devNull)
+    }
+
+    override func tearDown() {
+        dup2(savedStdin, STDIN_FILENO)
+        close(savedStdin)
+    }
 
     private func run(_ script: String, helper: String? = nil) -> Int32 {
         PTYSpawn().run(command: ["/bin/sh", "-c", script], execHelper: helper).exitCode
@@ -52,6 +67,31 @@ final class PTYSpawnTests: XCTestCase {
         let start = Date()
         XCTAssertEqual(run("cat >/dev/null; exit 0", helper: helper), 0)
         XCTAssertLessThan(Date().timeIntervalSince(start), 10)
+    }
+
+    /// Runs `body` with stdin redirected from a file with the given contents.
+    private func withStdin(_ contents: String, _ body: () -> Void) throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("kf-stdin-\(UUID().uuidString.prefix(8))")
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let fd = open(url.path, O_RDONLY)
+        defer { close(fd) }
+        dup2(fd, STDIN_FILENO)   // tearDown restores the original stdin
+        body()
+    }
+
+    func testRedirectedFileInputReachesTheChild() throws {
+        try withStdin("hello\n") {
+            XCTAssertEqual(run("read x; [ \"$x\" = hello ]", helper: helper), 0)
+        }
+    }
+
+    func testLargeInputIsDeliveredCompletelyWithoutDeadlock() throws {
+        let line = "0123456789abcdef\n"   // short lines: a terminal drops lines over 4095 bytes
+        try withStdin(String(repeating: line, count: 20_000)) {
+            // 340,000 bytes: far more than the PTY buffers, so this needs backpressure.
+            XCTAssertEqual(run("stty -echo; n=$(cat | wc -c); [ \"$n\" -eq 340000 ]", helper: helper), 0)
+        }
     }
 
     func testTerminationSignalIsForwardedToChild() {

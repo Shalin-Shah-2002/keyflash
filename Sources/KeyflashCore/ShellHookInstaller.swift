@@ -53,7 +53,14 @@ end
 
         let isFish = target.path.hasSuffix("config.fish")
         let block = isFish ? makeFishTemplate() : makeHookTemplate()
-        let existing = (try? String(contentsOf: target, encoding: .utf8)) ?? ""
+        var existing = ""
+        if FileManager.default.fileExists(atPath: target.path) {
+            // Never treat an unreadable file as empty: we'd overwrite the user's rc file.
+            guard let text = try? String(contentsOf: target, encoding: .utf8) else {
+                return "Shell hook FAILED → \(target.path): not readable as UTF-8; left untouched"
+            }
+            existing = text
+        }
         var content = stripHook(existing)
         if !content.isEmpty && !content.hasSuffix("\n") { content += "\n" }
         if !content.isEmpty { content += "\n" }
@@ -65,7 +72,7 @@ end
         do {
             try FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
-            try content.write(to: target, atomically: true, encoding: .utf8)
+            try writePreservingMode(Data(content.utf8), to: target)
             return "Shell hook installed → \(target.path)"
         } catch {
             return "Shell hook FAILED → \(target.path): \(error.localizedDescription)"
@@ -78,7 +85,7 @@ end
         guard let content = try? String(contentsOf: file, encoding: .utf8) else { return }
         let cleaned = stripHook(content)
         if cleaned != content {
-            try? cleaned.write(to: file, atomically: true, encoding: .utf8)
+            try? writePreservingMode(Data(cleaned.utf8), to: file)
         }
     }
 

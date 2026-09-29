@@ -53,6 +53,8 @@ Works with:
 - 🚀 **Menu Bar App** — Lives in your menu bar, no dock icon, no distractions.
 - 🔦 **Keyboard Backlight Pulse** — Continuous flash until you interact (key press, mouse click, or scroll).
 - 🎯 **Exact Detection** — Uses Claude Code's `Stop` / `Notification` hooks and an OpenCode plugin (`session.idle`, `permission.asked`, `question.asked`). It fires when the agent finishes its turn or is blocked waiting on you. It never fires for sub-agents, while you type, or on startup.
+- 🎨 **Different Flash for Each Event** — A slow pulse when a task is **done**, a fast blink when an agent **needs you** (permission prompt or question), and a rapid strobe on an **error**. A more urgent flash is never downgraded by a later "done".
+- 🤫 **Quiet When You're Watching** — No flash if a terminal or editor is the frontmost app and you were active in the last 10 seconds (5 s for "needs you" / error). Configurable, and it's just one toggle in Settings.
 - ♻️ **Self-Healing Hooks** — The app (re)installs the hooks on every launch, so they keep pointing at the right `keyflash-run` even after you move or update the app.
 - 💡 **Restores Your Brightness** — The backlight goes back to exactly the level you had before the flash.
 - 🛡️ **Always Stops** — Stops on key press, click or scroll (no special permission needed), from **Stop Flashing** in the menu, and after a 30-minute safety cap.
@@ -152,8 +154,8 @@ This sets up:
 
 | Agent | What gets installed | Flashes when |
 |---|---|---|
-| **Claude Code** | `Stop` + `Notification` hooks in `~/.claude/settings.json` (your other settings are preserved; the previous file is saved as `settings.json.keyflash-backup`) | Claude finishes its turn, or asks for permission / MCP input |
-| **OpenCode** | Plugin at `~/.config/opencode/plugins/keyflash.js` | The main session goes idle, or it asks for permission / asks you a question (sub-agent sessions are ignored) |
+| **Claude Code** | `Stop` (→ done) + `Notification` (→ needs you) hooks in `~/.claude/settings.json` (your other settings are preserved; the previous file is saved as `settings.json.keyflash-backup`) | Claude finishes its turn, or asks for permission / MCP input |
+| **OpenCode** | Plugin at `~/.config/opencode/plugins/keyflash.js` | The main session goes idle (done), asks for permission or asks you a question (needs you), or errors (Esc-aborts and sub-agent sessions are ignored) |
 | **aider** | `aider` shell function in your rc file that runs it through `keyflash-run` | A response finishes after you press Enter |
 
 **Restart any running `claude` / `opencode` sessions** so they load the hooks. You run them exactly as before, with no aliases needed. (Old `claude`/`opencode` aliases from earlier keyflash versions are removed when you click **Install Agent Hooks**. If you keep them, they're harmless.)
@@ -182,6 +184,8 @@ Click the menu bar icon → **Settings…** to open the configuration panel:
 | Setting | Default | Description |
 |---|---|---|
 | **Flash when an agent finishes** | On | Master toggle for the keyboard flash |
+| **Stay quiet when I'm watching the terminal** | On | Skip the flash when a terminal/editor is frontmost and you were recently active |
+| **Counts as watching if active within** | 10 s | How recent your last key press or click must be (needs-you and error events use half) |
 | **Install / Repair Agent Hooks** | — | Shows whether Claude Code / OpenCode hooks are installed and (re)installs them |
 | **Launch at Login** | Off | Auto-start keyflash when you log in |
 
@@ -199,7 +203,17 @@ pulseBrightness: 255
 launchAtLogin: false
 shouldAutoInstall: true
 debugMode: false
+suppressWhenWatching: true
+watchingIdleSeconds: 10
+terminalBundleIds:            # apps that count as "the agent's terminal"; a trailing * matches a prefix
+  - com.apple.Terminal
+  - com.googlecode.iterm2
+  - com.mitchellh.ghostty
+  - com.microsoft.VSCode
+  - com.jetbrains.*
 ```
+
+The default `terminalBundleIds` list also covers kitty, Alacritty, WezTerm, Warp, Hyper, VS Code Insiders, Cursor and Zed. Add your terminal's bundle ID (`osascript -e 'id of app "YourTerminal"'`) if it isn't listed.
 
 ---
 
@@ -207,7 +221,7 @@ debugMode: false
 
 ### Test the backlight from the menu bar
 
-Click the menu bar icon → **Test Flicker** to trigger a flash immediately (no agent needed).
+Click the menu bar icon → **Test Flash** and pick **Task done**, **Needs you** or **Error** to see each pattern immediately (no agent needed; the "quiet when watching" rule is bypassed).
 
 ### Test via CLI
 
@@ -228,10 +242,12 @@ Enable `debugMode: true` in config (or pass `--debug`) for verbose prompt detect
 ### Simulate an agent finishing
 
 ```bash
-/Applications/keyflash.app/Contents/MacOS/keyflash-run --notify claude
+/Applications/keyflash.app/Contents/MacOS/keyflash-run --notify claude                      # done
+/Applications/keyflash.app/Contents/MacOS/keyflash-run --notify claude --event attention   # needs you
+/Applications/keyflash.app/Contents/MacOS/keyflash-run --notify claude --event error       # error
 ```
 
-This is exactly what the Claude Code / OpenCode hooks run.
+This is exactly what the Claude Code / OpenCode hooks run. If you run it from the terminal you're typing in, "quiet when watching" will (correctly) skip the flash, so switch to another app first or wait 10 seconds.
 
 ---
 
@@ -314,6 +330,7 @@ keyflash/
 │   │   └── KeyflashRun.swift
 │   └── KeyflashCore/          # Shared, Foundation-only library
 │       ├── AgentHooks.swift   # Claude Code / OpenCode hook installer
+│       ├── AlertPolicy.swift  # Event types, flash patterns, "quiet when watching" decision
 │       ├── NotifySocket.swift # Unix socket client + server
 │       ├── PTYSpawn.swift     # PTY + posix_spawn + poll I/O loop
 │       ├── PromptDetector.swift  # Enter + silence detection (fallback for aider)
@@ -337,9 +354,10 @@ keyflash/
 
 1. **Check the app is running.** Look for the ⚡ icon in the menu bar, and turn on **Launch at Login**.
 2. **Check the hooks.** Open Settings → **Agents** (both should say ✓), or run `keyflash-run --install-hooks`. Then **restart** your `claude` / `opencode` session.
-3. **Simulate a finish.** Run `keyflash-run --notify claude`. If this flashes, the hooks are the problem; if it doesn't, it's the app or the backlight.
-4. **Check the backlight tool.** Run `keyflash-run --test-pulse`, and check that your Mac has a keyboard backlight.
-5. **Check the logs.** Run `tail -f ~/Library/Logs/keyflash.log`.
+3. **Simulate a finish.** Switch to another app first (or wait 10 s), then run `keyflash-run --notify claude`. If this flashes, the hooks are the problem; if it doesn't, it's the app or the backlight.
+4. **Flash skipped on purpose?** The log says `skipping done flash — watching …` when "quiet when watching" applied. Turn it off in Settings if you don't want it.
+5. **Check the backlight tool.** Run `keyflash-run --test-pulse`, and check that your Mac has a keyboard backlight.
+6. **Check the logs.** Run `tail -f ~/Library/Logs/keyflash.log`.
 
 ### 🛑 Flash doesn't stop
 

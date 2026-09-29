@@ -10,7 +10,7 @@ import Foundation
 ///   that reacts to `session.idle` (main sessions only), `permission.asked`
 ///   and `question.asked`.
 ///
-/// Every hook runs `keyflash-run --notify <agent>`, which pokes the menu bar
+/// Every hook runs `keyflash-run --notify <agent> --event <done|attention|error>`, which pokes the menu bar
 /// app over its Unix socket.
 public enum AgentHooks {
     /// Substring used to recognise hook entries that keyflash owns.
@@ -118,20 +118,20 @@ public enum AgentHooks {
 
     // MARK: - Claude Code
 
-    /// Claude Code events we hook, with their matcher (nil = no matcher).
-    static let claudeEvents: [(event: String, matcher: String?)] = [
+    /// Claude Code events we hook: matcher (nil = none) and the keyflash alert it maps to.
+    static let claudeEvents: [(event: String, matcher: String?, alert: AlertEvent)] = [
         // Main agent finished its turn.
-        ("Stop", nil),
+        ("Stop", nil, .done),
         // Claude is blocked waiting on you (tool permission or MCP input).
-        ("Notification", "permission_prompt|elicitation_dialog"),
+        ("Notification", "permission_prompt|elicitation_dialog", .attention),
     ]
 
     /// Returns true if the settings file was changed.
     @discardableResult
     public static func installClaude(runPath: String) throws -> Bool {
-        let command = "\(shellQuote(runPath)) --notify claude"
         return try updateClaudeSettings { hooks in
-            for (event, matcher) in claudeEvents {
+            for (event, matcher, alert) in claudeEvents {
+                let command = "\(shellQuote(runPath)) --notify claude --event \(alert.rawValue)"
                 var groups = try strippedGroups(hooks[event], event: event)
                 var group: [String: Any] = [
                     "hooks": [[
@@ -149,7 +149,7 @@ public enum AgentHooks {
 
     public static func uninstallClaude() throws {
         try updateClaudeSettings { hooks in
-            for (event, _) in claudeEvents {
+            for (event, _, _) in claudeEvents {
                 let groups = try strippedGroups(hooks[event], event: event)
                 if groups.isEmpty {
                     hooks.removeValue(forKey: event)
@@ -208,9 +208,13 @@ public enum AgentHooks {
         )
         try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let original {
-            try? original.write(to: url.appendingPathExtension("keyflash-backup"), options: .atomic)
+            try? writePreservingMode(original, to: url.appendingPathExtension("keyflash-backup"))
+            // (the backup takes the original's permissions from the original file itself)
+            if let mode = (try? fm.attributesOfItem(atPath: url.path))?[.posixPermissions] {
+                try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: url.appendingPathExtension("keyflash-backup").path)
+            }
         }
-        try (out + Data("\n".utf8)).write(to: url, options: .atomic)
+        try writePreservingMode(out + Data("\n".utf8), to: url)
         return true
     }
 
@@ -262,9 +266,9 @@ public enum AgentHooks {
 
         const KEYFLASH_RUN = \(jsStringLiteral(runPath))
 
-        function notify() {
+        function notify(event) {
           try {
-            const child = spawn(KEYFLASH_RUN, ["--notify", "opencode"], { stdio: "ignore", detached: true })
+            const child = spawn(KEYFLASH_RUN, ["--notify", "opencode", "--event", event], { stdio: "ignore", detached: true })
             child.on("error", () => {})
             child.unref()
           } catch {}
@@ -303,12 +307,19 @@ public enum AgentHooks {
                     break
                   }
                   case "session.idle":
-                    if (!(await isChildSession(event.properties && event.properties.sessionID))) notify()
+                    if (!(await isChildSession(event.properties && event.properties.sessionID))) notify("done")
                     break
+                  case "session.error": {
+                    // Skip sub-agents and runs you aborted yourself (Esc).
+                    const props = event.properties || {}
+                    const name = props.error && props.error.name
+                    if (name !== "MessageAbortedError" && !(await isChildSession(props.sessionID))) notify("error")
+                    break
+                  }
                   case "permission.asked":
                   case "permission.updated":
                   case "question.asked":
-                    notify()
+                    notify("attention")
                     break
                 }
               } catch {}

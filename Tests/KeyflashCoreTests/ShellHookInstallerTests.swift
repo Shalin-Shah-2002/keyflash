@@ -43,6 +43,23 @@ final class ShellHookInstallerTests: SandboxedTestCase {
         XCTAssertTrue(read(".bash_profile")?.contains("function aider {") ?? false)
     }
 
+    func testNonUTF8RcFileIsNeverOverwritten() throws {
+        let url = home.appendingPathComponent(".zshrc")
+        let bytes = Data([0x65, 0x78, 0x70, 0x6F, 0x72, 0x74, 0x20, 0x58, 0x3D, 0xE9, 0x0A])  // Latin-1 "é"
+        try bytes.write(to: url)
+        let status = ShellHookInstaller.installIfNeeded(shell: "/bin/zsh")
+        XCTAssertTrue(status.contains("FAILED"), status)
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+    }
+
+    func testRcFilePermissionsArePreserved() throws {
+        try write("export A=1\n", to: ".zshrc")
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: home.appendingPathComponent(".zshrc").path)
+        _ = ShellHookInstaller.installIfNeeded(shell: "/bin/zsh")
+        let mode = try FileManager.default.attributesOfItem(atPath: home.appendingPathComponent(".zshrc").path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600)
+    }
+
     /// rc files are sourced by bash/zsh (`function name {}` is valid in both).
     func testGeneratedHookIsValidBash() throws {
         _ = ShellHookInstaller.installIfNeeded(shell: "/bin/bash")

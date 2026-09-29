@@ -13,9 +13,9 @@ import Glibc
 ///
 /// This is the primary notification path. The direct Backlight.pulse() 2-flash
 /// was too subtle — the menu bar's flickerUntilInteraction() is the real signal.
-private func notifyMenuBarApp(agent: String) {
-    keyflashLog("notifyMenuBarApp: sending taskDone for agent=\(agent)")
-    NotifyClient.sendDone(agent: agent, pid: Int(ProcessInfo.processInfo.processIdentifier))
+private func notifyMenuBarApp(agent: String, event: AlertEvent = .done) {
+    keyflashLog("notifyMenuBarApp: sending \(event.rawValue) for agent=\(agent)")
+    NotifyClient.send(agent: agent, pid: Int(ProcessInfo.processInfo.processIdentifier), event: event)
 }
 
 /// The PTY-wrapper CLI for keyflash.
@@ -46,6 +46,7 @@ struct KeyflashRun: ParsableCommand {
         Examples:
           keyflash-run --install-hooks
           keyflash-run --notify claude
+          keyflash-run --notify claude --event attention
           keyflash-run -- aider
           keyflash-run --test-pulse
         """,
@@ -64,6 +65,9 @@ struct KeyflashRun: ParsableCommand {
     @Option(name: .long, help: "Tell the menu bar app that <agent> finished a task (used by agent hooks)")
     var notify: String?
 
+    @Option(name: .long, help: "With --notify: done (default), attention (agent needs you) or error")
+    var event: String?
+
     @Flag(name: .long, help: "Install Claude Code and OpenCode completion hooks")
     var installHooks = false
 
@@ -72,8 +76,15 @@ struct KeyflashRun: ParsableCommand {
 
     mutating func run() throws {
         if let agent = notify {
+            var alert = AlertEvent.done
+            if let raw = event {
+                guard let parsed = AlertEvent(rawValue: raw) else {
+                    throw ValidationError("Unknown --event '\(raw)'. Use: \(AlertEvent.allCases.map(\.rawValue).joined(separator: ", "))")
+                }
+                alert = parsed
+            }
             // Called from agent hooks: must be fast, silent and never fail the agent.
-            notifyMenuBarApp(agent: agent.isEmpty ? "agent" : agent)
+            notifyMenuBarApp(agent: agent.isEmpty ? "agent" : agent, event: alert)
             return
         }
 
