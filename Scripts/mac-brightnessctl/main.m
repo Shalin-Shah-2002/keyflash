@@ -23,6 +23,14 @@ int main(int argc, const char * argv[]) {
             fprintf(stderr, "Error: CoreBrightness KeyboardBrightnessClient is unavailable on this Mac\n");
             return 2;
         }
+        // An explicitly empty list means there is no controllable backlight (external
+        // keyboard, Mac without one). Any other/unknown shape: carry on, as before.
+        id backlightIDs = [KeyboardManager.brightnessClient copyKeyboardBacklightIDs];
+        if (([backlightIDs isKindOfClass:[NSArray class]] || [backlightIDs isKindOfClass:[NSSet class]])
+            && [backlightIDs count] == 0) {
+            fprintf(stderr, "Error: no keyboard backlight found on this Mac\n");
+            return 3;
+        }
 
         if (argc == 1) {
             float currentBrightness = [BrightnessControl getBrightness];

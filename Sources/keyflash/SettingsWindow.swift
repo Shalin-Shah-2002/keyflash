@@ -7,6 +7,8 @@ import KeyflashCore
 struct SettingsWindow: View {
     // Backed by ~/.config/keyflash/config.yaml (the file the app actually reads).
     @State private var backlightEnabled = ConfigLoader.load().backlightEnabled
+    @State private var suppressWhenWatching = ConfigLoader.load().suppressWhenWatching
+    @State private var watchingIdleSeconds = ConfigLoader.load().watchingIdleSeconds
     @State private var launchAtLogin = LaunchAgentManager.isRegistered
     @State private var hooksStatus = SettingsWindow.currentHooksStatus()
 
@@ -41,6 +43,24 @@ struct SettingsWindow: View {
                             .onChange(of: backlightEnabled) { _, newValue in
                                 ConfigStore.shared.update { $0.backlightEnabled = newValue }
                             }
+
+                        Toggle("Stay quiet when I'm watching the terminal", isOn: $suppressWhenWatching)
+                            .toggleStyle(SwitchToggleStyle(tint: Color.keyflashOrange))
+                            .onChange(of: suppressWhenWatching) { _, newValue in
+                                ConfigStore.shared.update { $0.suppressWhenWatching = newValue }
+                            }
+
+                        Stepper("Counts as watching if active within \(watchingIdleSeconds)s",
+                                value: $watchingIdleSeconds, in: 2...120)
+                            .font(.subheadline)
+                            .disabled(!suppressWhenWatching)
+                            .onChange(of: watchingIdleSeconds) { _, newValue in
+                                ConfigStore.shared.update { $0.watchingIdleSeconds = newValue }
+                            }
+
+                        Text("A terminal or editor must also be the frontmost app. Apps are listed in terminalBundleIds in ~/.config/keyflash/config.yaml.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
 
                     // Agents
@@ -49,7 +69,9 @@ struct SettingsWindow: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Button("Install / Repair Agent Hooks") {
+                            ConfigStore.shared.update { $0.shouldAutoInstall = true }
                             AgentHooks.installAll().forEach { log("Settings: \($0)") }
+                            log("Settings: \(ShellHookInstaller.installIfNeeded())")
                             hooksStatus = SettingsWindow.currentHooksStatus()
                         }
                         .buttonStyle(.bordered)
@@ -61,12 +83,15 @@ struct SettingsWindow: View {
                         Toggle("Launch at Login", isOn: $launchAtLogin)
                             .toggleStyle(SwitchToggleStyle(tint: Color.keyflashOrange))
                             .onChange(of: launchAtLogin) { _, newValue in
+                                guard newValue != LaunchAgentManager.isRegistered else { return }
                                 if newValue {
                                     LaunchAgentManager.register()
                                 } else {
                                     LaunchAgentManager.unregister()
                                 }
-                                ConfigStore.shared.update { $0.launchAtLogin = newValue }
+                                // Show the real state (registration can fail or need approval).
+                                let actual = LaunchAgentManager.isRegistered
+                                launchAgentSync(actual)
                             }
                     }
                 }
@@ -92,6 +117,11 @@ struct SettingsWindow: View {
                 .overlay(Color.kf.glassBorder)
         }
         .padding(.horizontal)
+    }
+
+    private func launchAgentSync(_ actual: Bool) {
+        launchAtLogin = actual
+        ConfigStore.shared.update { $0.launchAtLogin = actual }
     }
 
     private static func currentHooksStatus() -> String {

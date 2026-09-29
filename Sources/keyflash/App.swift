@@ -31,6 +31,7 @@ final class BacklightFlickerController {
 
     // Main-thread state
     private(set) var isFlashing = false
+    private var currentEvent: AlertEvent = .done
     private var flashStartedAt: Date?
     private var generation = 0
     private var inputPollTimer: Timer?
@@ -74,14 +75,21 @@ final class BacklightFlickerController {
 
     // MARK: - Public (main thread)
 
-    func flickerUntilInteraction() {
-        log("BacklightFlicker: starting")
+    func flickerUntilInteraction(event: AlertEvent = .done) {
+        // Already flashing: only a more urgent event replaces the current
+        // pattern, so a pending "needs you" is never downgraded by a "done".
+        if isFlashing && event.priority <= currentEvent.priority {
+            log("BacklightFlicker: already flashing \(currentEvent.rawValue); ignoring \(event.rawValue)")
+            return
+        }
+        log("BacklightFlicker: starting (\(event.rawValue))")
         generation += 1
         let gen = generation
         isFlashing = true
+        currentEvent = event
         flashStartedAt = Date()
         startInputWatchers()
-        hw.async { self.hwStartFlash(generation: gen) }
+        hw.async { self.hwStartFlash(generation: gen, pattern: event.pattern) }
     }
 
     func stop(reason: String) {
@@ -99,14 +107,34 @@ final class BacklightFlickerController {
         hw.sync {}
     }
 
-    func testFlicker() { log("BacklightFlicker: test"); flickerUntilInteraction() }
+    func testFlicker(event: AlertEvent) { log("BacklightFlicker: test \(event.rawValue)"); flickerUntilInteraction(event: event) }
+
+    /// The backlight can't be controlled here, so make a sound instead of silently
+    /// losing the alert (external keyboard, unsupported Mac, or the private API broke).
+    private func fallbackAlert() {
+        guard ConfigLoader.load().fallbackSound else { return }
+        let name: String
+        switch currentEvent {
+        case .done: name = "Glass"
+        case .attention: name = "Ping"
+        case .error: name = "Basso"
+        }
+        log("BacklightFlicker: backlight unavailable — playing \(name) instead")
+        if let sound = NSSound(named: NSSound.Name(name)) {
+            sound.play()
+        } else {
+            NSSound.beep()
+        }
+    }
 
     // MARK: - Backlight queue
 
-    private func hwStartFlash(generation gen: Int) {
+    private func hwStartFlash(generation gen: Int, pattern: FlashPattern) {
         guard let backlight = hwBacklight ?? Backlight() else {
             log("BacklightFlicker: mac-brightnessctl not found, cannot flash")
-            DispatchQueue.main.async { if self.generation == gen { self.stop(reason: "no backlight tool") } }
+            DispatchQueue.main.async {
+                if self.generation == gen { self.fallbackAlert(); self.stop(reason: "no backlight tool") }
+            }
             return
         }
         hwBacklight = backlight
@@ -123,7 +151,7 @@ final class BacklightFlickerController {
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: backlight.binaryPath)
-        task.arguments = Backlight.flashArguments(duration: maxFlashDuration)
+        task.arguments = Backlight.flashArguments(duration: maxFlashDuration, pattern: pattern)
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         task.terminationHandler = { [weak self] finished in
@@ -132,7 +160,11 @@ final class BacklightFlickerController {
                 self.hwFlashTask = nil
                 log("BacklightFlicker: flash process ended by itself (status \(finished.terminationStatus))")
                 DispatchQueue.main.async {
-                    if self.generation == gen { self.stop(reason: "flash ended") }
+                    guard self.generation == gen else { return }
+                    // A non-zero exit means the helper couldn't drive the backlight
+                    // (no built-in keyboard backlight, or the private API is gone).
+                    if finished.terminationStatus != 0 { self.fallbackAlert() }
+                    self.stop(reason: "flash ended")
                 }
             }
         }
@@ -142,7 +174,9 @@ final class BacklightFlickerController {
             log("BacklightFlicker: flash running (saved brightness \(hwSavedLevel ?? -1))")
         } catch {
             log("BacklightFlicker: failed to launch flash: \(error.localizedDescription)")
-            DispatchQueue.main.async { if self.generation == gen { self.stop(reason: "launch failed") } }
+            DispatchQueue.main.async {
+                if self.generation == gen { self.fallbackAlert(); self.stop(reason: "launch failed") }
+            }
         }
     }
 
@@ -257,6 +291,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // NSStatusItem / MenuBarExtra icon appears immediately, even on a
         // fresh DMG install where macOS hasn't cached the app's activation policy.
         NSApp.setActivationPolicy(.accessory)
+
+        // Only one keyflash may own the notification socket.
+        if let id = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { $0 != .current }) {
+            log("AppDelegate: another keyflash is already running — quitting this copy")
+            NSApp.terminate(nil)
+            return
+        }
         startNotificationService()
         autoInstallAgentHooks()
     }
@@ -267,9 +309,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startNotificationService() {
-        let server = NotifyServer { [weak self] agent, pid in
-            log("AppDelegate: received task done — agent=\(agent) pid=\(pid)")
-            self?.handleTaskComplete()
+        let server = NotifyServer { [weak self] message in
+            log("AppDelegate: received \(message.event.rawValue) — agent=\(message.agent) pid=\(message.pid)")
+            self?.handleAlert(message)
         }
         if !server.start() {
             let alert = NSAlert()
@@ -292,18 +334,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             for line in AgentHooks.installAll() {
                 log("AppDelegate: \(line)")
             }
+            // Keep an already-installed aider hook pointing at this copy of the app.
+            for file in ShellHookInstaller.refreshInstalled() {
+                log("AppDelegate: refreshed shell hook in \(file)")
+            }
         }
     }
 
-    func handleTaskComplete() {
-        log("AppDelegate: handleTaskComplete")
+    func handleAlert(_ message: NotifyMessage) {
+        let event = message.event
         let config = ConfigLoader.load()
-        if config.enabled && config.backlightEnabled {
-            BacklightFlickerController.shared.flickerUntilInteraction()
+        guard config.enabled && config.backlightEnabled else { return }
+
+        // Stay quiet when you're already watching the agent: the app it runs in
+        // (found from the sender's parent processes) is in front and you were
+        // active moments ago.
+        let front = NSWorkspace.shared.frontmostApplication
+        let hostApps = message.ancestors.filter {
+            NSRunningApplication(processIdentifier: pid_t($0))?.activationPolicy == .regular
+        }
+        let decision = AlertPolicy.evaluate(
+            event: event,
+            config: config,
+            context: WatchContext(
+                frontmostBundleID: front?.bundleIdentifier,
+                frontmostPID: front.map { Int($0.processIdentifier) },
+                agentHostAppPIDs: hostApps
+            ),
+            idleSeconds: BacklightFlickerController.secondsSinceLastUserInput()
+        )
+        switch decision {
+        case .flash:
+            BacklightFlickerController.shared.flickerUntilInteraction(event: event)
+        case .suppressed(let reason):
+            log("AppDelegate: skipping \(event.rawValue) flash — \(reason)")
         }
     }
 
-    @objc func testFlicker() { BacklightFlickerController.shared.testFlicker() }
+    @objc func testDone() { BacklightFlickerController.shared.testFlicker(event: .done) }
+    @objc func testAttention() { BacklightFlickerController.shared.testFlicker(event: .attention) }
+    @objc func testError() { BacklightFlickerController.shared.testFlicker(event: .error) }
 
     @objc func stopFlashing() { BacklightFlickerController.shared.stop(reason: "menu") }
 
@@ -329,6 +399,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func installHooks() {
+        ConfigStore.shared.update { $0.shouldAutoInstall = true }
         var lines = AgentHooks.installAll()
         lines.append(ShellHookInstaller.installIfNeeded())
         lines.forEach { log("AppDelegate: \($0)") }
@@ -365,7 +436,11 @@ struct KeyflashApp: App {
         MenuBarExtra {
             Text("keyflash v\(appVersion)")
             Divider()
-            Button("Test Flicker") { delegate.testFlicker() }
+            Menu("Test Flash") {
+                Button("Task done (slow pulse)") { delegate.testDone() }
+                Button("Needs you (fast blink)") { delegate.testAttention() }
+                Button("Error (rapid strobe)") { delegate.testError() }
+            }
             Button("Stop Flashing") { delegate.stopFlashing() }
             Button("Settings…") { delegate.openSettings() }
             Button("Install Agent Hooks") { delegate.installHooks() }

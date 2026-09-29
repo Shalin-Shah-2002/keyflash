@@ -16,8 +16,8 @@ final class AgentHooksTests: SandboxedTestCase {
         XCTAssertTrue(try AgentHooks.installClaude(runPath: runPath))
 
         let root = try json(".claude/settings.json")
-        XCTAssertEqual(claudeCommands(root, "Stop"), ["'\(runPath)' --notify claude"])
-        XCTAssertEqual(claudeCommands(root, "Notification"), ["'\(runPath)' --notify claude"])
+        XCTAssertEqual(claudeCommands(root, "Stop"), ["'\(runPath)' --notify claude --event done"])
+        XCTAssertEqual(claudeCommands(root, "Notification"), ["'\(runPath)' --notify claude --event attention"])
         let notif = ((root["hooks"] as? [String: Any])?["Notification"] as? [[String: Any]])?.first
         XCTAssertEqual(notif?["matcher"] as? String, "permission_prompt|elicitation_dialog")
         let stop = ((root["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]])?.first
@@ -41,7 +41,7 @@ final class AgentHooksTests: SandboxedTestCase {
         let root = try json(".claude/settings.json")
         XCTAssertEqual(root["model"] as? String, "opus")
         XCTAssertEqual((root["permissions"] as? [String: Any])?["allow"] as? [String], ["Bash(ls:*)"])
-        XCTAssertEqual(claudeCommands(root, "Stop"), ["say done", "'\(runPath)' --notify claude"])
+        XCTAssertEqual(claudeCommands(root, "Stop"), ["say done", "'\(runPath)' --notify claude --event done"])
         XCTAssertEqual(claudeCommands(root, "PreToolUse"), ["audit.sh"])
 
         // A backup of the original file is kept.
@@ -59,8 +59,17 @@ final class AgentHooksTests: SandboxedTestCase {
         try AgentHooks.installClaude(runPath: "/old/keyflash-run")
         XCTAssertTrue(try AgentHooks.installClaude(runPath: runPath))
         let root = try json(".claude/settings.json")
-        XCTAssertEqual(claudeCommands(root, "Stop"), ["'\(runPath)' --notify claude"])
-        XCTAssertEqual(claudeCommands(root, "Notification"), ["'\(runPath)' --notify claude"])
+        XCTAssertEqual(claudeCommands(root, "Stop"), ["'\(runPath)' --notify claude --event done"])
+        XCTAssertEqual(claudeCommands(root, "Notification"), ["'\(runPath)' --notify claude --event attention"])
+    }
+
+    func testOldHooksWithoutEventAreUpgraded() throws {
+        try write("""
+        { "hooks": { "Notification": [ { "matcher": "permission_prompt", "hooks": [ { "type": "command", "command": "'/old/keyflash-run' --notify claude" } ] } ] } }
+        """, to: ".claude/settings.json")
+        XCTAssertTrue(try AgentHooks.installClaude(runPath: runPath))
+        let root = try json(".claude/settings.json")
+        XCTAssertEqual(claudeCommands(root, "Notification"), ["'\(runPath)' --notify claude --event attention"])
     }
 
     func testInvalidJSONIsLeftUntouched() throws {
@@ -88,6 +97,26 @@ final class AgentHooksTests: SandboxedTestCase {
         let attrs = try FileManager.default.attributesOfItem(atPath: home.appendingPathComponent(".claude/settings.json").path)
         XCTAssertEqual(attrs[.type] as? FileAttributeType, .typeSymbolicLink)
         XCTAssertTrue(read("dotfiles/claude-settings.json")?.contains("--notify claude") ?? false)
+    }
+
+    func testSettingsPermissionsSurviveAndBackupIsNotWorldReadable() throws {
+        try write("{ \"env\": { \"ANTHROPIC_API_KEY\": \"secret\" } }", to: ".claude/settings.json")
+        let settings = home.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: settings.path)
+
+        try AgentHooks.installClaude(runPath: runPath)
+
+        func mode(_ url: URL) throws -> Int? {
+            (try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue
+        }
+        XCTAssertEqual(try mode(settings), 0o600)
+        XCTAssertEqual(try mode(home.appendingPathComponent(".claude/settings.json.keyflash-backup")), 0o600)
+    }
+
+    func testNewSettingsFileIsPrivate() throws {
+        try AgentHooks.installClaude(runPath: runPath)
+        let mode = try FileManager.default.attributesOfItem(atPath: home.appendingPathComponent(".claude/settings.json").path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600)
     }
 
     func testUninstallRemovesOnlyKeyflashHooks() throws {
@@ -121,8 +150,26 @@ final class AgentHooksTests: SandboxedTestCase {
         let plugin = try XCTUnwrap(read(".config/opencode/plugins/keyflash.js"))
         XCTAssertTrue(plugin.contains("const KEYFLASH_RUN = \"\\/Applications\\/key flash.app\\/Contents\\/MacOS\\/keyflash-run\""))
         XCTAssertTrue(plugin.contains("session.idle"))
+        XCTAssertTrue(plugin.contains("notify(\"attention\")"))
+        XCTAssertTrue(plugin.contains("notify(\"error\")"))
         XCTAssertEqual(plugin.components(separatedBy: "export ").count - 1, 1, "OpenCode calls every export")
         XCTAssertTrue(AgentHooks.isInstalled(.opencode))
+    }
+
+    func testOpenCodePluginGoesToXDGConfigHomeToo() throws {
+        let xdg = home.appendingPathComponent("xdg-config")
+        let saved = getenv("XDG_CONFIG_HOME").map { String(cString: $0) }
+        setenv("XDG_CONFIG_HOME", xdg.path, 1)
+        defer { if let saved { setenv("XDG_CONFIG_HOME", saved, 1) } else { unsetenv("XDG_CONFIG_HOME") } }
+
+        XCTAssertTrue(try AgentHooks.installOpenCode(runPath: runPath))
+        XCTAssertNotNil(read(".config/opencode/plugins/keyflash.js"), "the default location")
+        XCTAssertNotNil(read("xdg-config/opencode/plugins/keyflash.js"), "and where a shell with XDG_CONFIG_HOME looks")
+        XCTAssertFalse(try AgentHooks.installOpenCode(runPath: runPath), "idempotent")
+
+        AgentHooks.uninstallAll()
+        XCTAssertNil(read(".config/opencode/plugins/keyflash.js"))
+        XCTAssertNil(read("xdg-config/opencode/plugins/keyflash.js"))
     }
 
     func testInstallAllRequiresExecutable() {

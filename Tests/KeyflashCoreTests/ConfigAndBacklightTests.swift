@@ -8,6 +8,68 @@ final class ConfigAndBacklightTests: SandboxedTestCase {
         XCTAssertTrue(config.enabled)
         XCTAssertTrue(config.backlightEnabled)
         XCTAssertTrue(config.shouldAutoInstall)
+        XCTAssertTrue(config.suppressWhenWatching)
+        XCTAssertEqual(config.watchingIdleSeconds, 10)
+        XCTAssertEqual(config.terminalBundleIds, KeyflashConfig.defaultTerminalBundleIds)
+    }
+
+    func testLoadsWatchingSettings() throws {
+        try write("""
+        suppressWhenWatching: false
+        watchingIdleSeconds: 25
+        terminalBundleIds:
+          - com.example.Term
+          - com.jetbrains.*
+        """, to: ".config/keyflash/config.yaml")
+        let config = ConfigLoader.load()
+        XCTAssertFalse(config.suppressWhenWatching)
+        XCTAssertEqual(config.watchingIdleSeconds, 25)
+        XCTAssertEqual(config.terminalBundleIds, ["com.example.Term", "com.jetbrains.*"])
+    }
+
+    func testSaveKeepsKeysKeyflashDoesNotKnow() throws {
+        try write("enabled: true\nsomeFutureSetting: 42\nmyNote: hello\n", to: ".config/keyflash/config.yaml")
+        var config = ConfigLoader.load()
+        config.enabled = false
+        try ConfigLoader.save(config)
+
+        let saved = try XCTUnwrap(read(".config/keyflash/config.yaml"))
+        XCTAssertTrue(saved.contains("someFutureSetting: 42"), saved)
+        XCTAssertTrue(saved.contains("myNote: hello"), saved)
+        XCTAssertFalse(ConfigLoader.load().enabled)
+    }
+
+    func testUpdatePersistsAndCreatesPrivateFile() throws {
+        try ConfigLoader.update { $0.shouldAutoInstall = false }
+        XCTAssertFalse(ConfigLoader.load().shouldAutoInstall)
+        let mode = try FileManager.default.attributesOfItem(atPath: KeyflashPaths.configFile.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600)
+
+        try ConfigLoader.update { $0.shouldAutoInstall = true }
+        XCTAssertTrue(ConfigLoader.load().shouldAutoInstall)
+    }
+
+    func testSaveRoundTripsEveryKnownKey() throws {
+        var config = KeyflashConfig()
+        config.enabled = false
+        config.suppressWhenWatching = false
+        config.watchingIdleSeconds = 33
+        config.fallbackSound = false
+        config.terminalBundleIds = ["a.b.c", "d.*"]
+        try ConfigLoader.save(config)
+        let loaded = ConfigLoader.load()
+        XCTAssertEqual(loaded.enabled, false)
+        XCTAssertEqual(loaded.suppressWhenWatching, false)
+        XCTAssertEqual(loaded.watchingIdleSeconds, 33)
+        XCTAssertEqual(loaded.fallbackSound, false)
+        XCTAssertEqual(loaded.terminalBundleIds, ["a.b.c", "d.*"])
+    }
+
+    func testWatchingWindowIsClamped() throws {
+        try write("watchingIdleSeconds: -5\n", to: ".config/keyflash/config.yaml")
+        XCTAssertEqual(ConfigLoader.load().watchingIdleSeconds, 0)
+        try write("watchingIdleSeconds: 999999\n", to: ".config/keyflash/config.yaml")
+        XCTAssertEqual(ConfigLoader.load().watchingIdleSeconds, 3600)
     }
 
     func testLoadsValues() throws {
@@ -23,6 +85,15 @@ final class ConfigAndBacklightTests: SandboxedTestCase {
     func testFlashArgumentsCoverRequestedDuration() {
         XCTAssertEqual(Backlight.flashArguments(duration: 1800), ["-f", "2250", "0.4", "200"])
         XCTAssertEqual(Backlight.flashArguments(duration: 0), ["-f", "1", "0.4", "200"])
+    }
+
+    func testFlashArgumentsSurviveDegenerateInput() {
+        // A zero interval used to trap converting infinity to Int.
+        let args = Backlight.flashArguments(duration: 60, interval: 0, fadeMs: -5)
+        XCTAssertEqual(args[0], "-f")
+        XCTAssertGreaterThan(Int(args[1])!, 0)
+        XCTAssertGreaterThan(Double(args[2])!, 0)
+        XCTAssertEqual(args[3], "0")
     }
 
     func testLogWritesToUserLogAndRotates() throws {

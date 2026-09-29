@@ -13,9 +13,9 @@ import Glibc
 ///
 /// This is the primary notification path. The direct Backlight.pulse() 2-flash
 /// was too subtle — the menu bar's flickerUntilInteraction() is the real signal.
-private func notifyMenuBarApp(agent: String) {
-    keyflashLog("notifyMenuBarApp: sending taskDone for agent=\(agent)")
-    NotifyClient.sendDone(agent: agent, pid: Int(ProcessInfo.processInfo.processIdentifier))
+private func notifyMenuBarApp(agent: String, event: AlertEvent = .done) {
+    keyflashLog("notifyMenuBarApp: sending \(event.rawValue) for agent=\(agent)")
+    NotifyClient.send(agent: agent, pid: Int(ProcessInfo.processInfo.processIdentifier), event: event)
 }
 
 /// The PTY-wrapper CLI for keyflash.
@@ -39,14 +39,16 @@ struct KeyflashRun: ParsableCommand {
         commandName: "keyflash-run",
         abstract: "Wrap a coding-agent CLI and flash the keyboard backlight on task completion.",
         discussion: """
-        Claude Code and OpenCode report task completion themselves through hooks
-        (installed automatically by the menu bar app, or with --install-hooks), so
-        they don't need to be wrapped. Wrapping is for other agents such as aider.
+        Claude Code, OpenCode and aider report task completion themselves through
+        hooks (installed by the menu bar app, or with --install-hooks), so none of
+        them needs to be wrapped. `keyflash-run -- <command>` is a generic wrapper
+        for other agents: it flashes when output goes quiet after you press Enter.
 
         Examples:
           keyflash-run --install-hooks
           keyflash-run --notify claude
-          keyflash-run -- aider
+          keyflash-run --notify claude --event attention
+          keyflash-run -- some-other-agent
           keyflash-run --test-pulse
         """,
         version: "0.3.0"
@@ -64,27 +66,45 @@ struct KeyflashRun: ParsableCommand {
     @Option(name: .long, help: "Tell the menu bar app that <agent> finished a task (used by agent hooks)")
     var notify: String?
 
-    @Flag(name: .long, help: "Install Claude Code and OpenCode completion hooks")
+    @Option(name: .long, help: "With --notify: done (default), attention (agent needs you) or error")
+    var event: String?
+
+    @Flag(name: .long, help: "Install the Claude Code, OpenCode and aider completion hooks")
     var installHooks = false
 
-    @Flag(name: .long, help: "Remove the Claude Code and OpenCode completion hooks")
+    @Flag(name: .long, help: "Remove the completion hooks (and stop the app from reinstalling them)")
     var uninstallHooks = false
 
     mutating func run() throws {
         if let agent = notify {
+            var alert = AlertEvent.done
+            if let raw = event {
+                guard let parsed = AlertEvent(rawValue: raw) else {
+                    throw ValidationError("Unknown --event '\(raw)'. Use: \(AlertEvent.allCases.map(\.rawValue).joined(separator: ", "))")
+                }
+                alert = parsed
+            }
             // Called from agent hooks: must be fast, silent and never fail the agent.
-            notifyMenuBarApp(agent: agent.isEmpty ? "agent" : agent)
+            notifyMenuBarApp(agent: agent.isEmpty ? "agent" : agent, event: alert)
             return
         }
 
         if installHooks {
             AgentHooks.installAll().forEach { print($0) }
-            print("Restart any running claude/opencode sessions to pick up the hooks.")
+            print(ShellHookInstaller.installIfNeeded())
+            // Undo a previous --uninstall-hooks: let the app keep them up to date again.
+            _ = try? ConfigLoader.update { $0.shouldAutoInstall = true }
+            print("Restart running claude/opencode sessions, and open a new terminal for aider.")
             return
         }
 
         if uninstallHooks {
             AgentHooks.uninstallAll().forEach { print($0) }
+            ShellHookInstaller.remove()
+            print("Shell hook removed")
+            // Otherwise the menu bar app would put them back on its next launch.
+            _ = try? ConfigLoader.update { $0.shouldAutoInstall = false }
+            print("Automatic reinstall is off (run --install-hooks to turn it back on).")
             return
         }
 

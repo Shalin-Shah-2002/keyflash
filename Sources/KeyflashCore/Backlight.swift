@@ -78,8 +78,14 @@ public final class Backlight {
     /// Arguments that make `mac-brightnessctl` flash on/off for about `duration`
     /// seconds (it restores the brightness it saw at start when it finishes).
     public static func flashArguments(duration: TimeInterval, interval: Double = 0.4, fadeMs: Int = 200) -> [String] {
-        let cycles = max(1, Int(duration / (2 * interval)))
-        return ["-f", "\(cycles)", "\(interval)", "\(fadeMs)"]
+        let interval = max(interval, 0.02)
+        let cycles = max(1, Int(min(duration, 24 * 3600) / (2 * interval)))
+        return ["-f", "\(cycles)", "\(interval)", "\(max(fadeMs, 0))"]
+    }
+
+    /// Flash arguments for an alert pattern (see `AlertEvent.pattern`).
+    public static func flashArguments(duration: TimeInterval, pattern: FlashPattern) -> [String] {
+        flashArguments(duration: duration, interval: pattern.interval, fadeMs: pattern.fadeMs)
     }
 
     // MARK: - Private

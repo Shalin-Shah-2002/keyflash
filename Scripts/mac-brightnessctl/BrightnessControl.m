@@ -14,9 +14,11 @@
         if (![client respondsToSelector:@selector(copyKeyboardBacklightIDs)]) return;
         id ids = [client copyKeyboardBacklightIDs];
         if (![ids isKindOfClass:[NSArray class]] || [ids count] == 0) return;
+        if (![[ids firstObject] isKindOfClass:[NSNumber class]]) return;
         cached = [[ids firstObject] unsignedLongLongValue];
         if ([client respondsToSelector:@selector(isKeyboardBuiltIn:)]) {
-            for (NSNumber *kbd in ids) {
+            for (id kbd in ids) {
+                if (![kbd isKindOfClass:[NSNumber class]]) continue;
                 if ([client isKeyboardBuiltIn:[kbd unsignedLongLongValue]]) {
                     cached = [kbd unsignedLongLongValue];
                     break;
