@@ -67,6 +67,49 @@ final class AlertPolicyTests: XCTestCase {
         XCTAssertTrue(reason.contains(terminal))
     }
 
+    // MARK: Host-app awareness
+
+    private func decide(_ event: AlertEvent, context: WatchContext, idle: TimeInterval) -> AlertPolicy.Decision {
+        AlertPolicy.evaluate(event: event, config: config, context: context, idleSeconds: idle)
+    }
+
+    func testWatchingMeansTheAgentsOwnAppIsInFront() {
+        // The agent runs in an app we don't have in the list; it still counts.
+        let ctx = WatchContext(frontmostBundleID: "com.example.UnknownTerm", frontmostPID: 500, agentHostAppPIDs: [500])
+        XCTAssertFalse(decide(.done, context: ctx, idle: 1).shouldFlash)
+    }
+
+    func testAnotherTerminalInFrontDoesNotCountWhenHostIsKnown() {
+        // The agent is in iTerm2 (pid 500); you're typing in Terminal.app (pid 600).
+        let ctx = WatchContext(frontmostBundleID: "com.apple.Terminal", frontmostPID: 600, agentHostAppPIDs: [500])
+        XCTAssertTrue(decide(.done, context: ctx, idle: 1).shouldFlash)
+    }
+
+    func testFallsBackToTheAppListWhenHostIsUnknown() {
+        // e.g. the agent runs inside tmux, whose server has no app parent.
+        let inList = WatchContext(frontmostBundleID: terminal, frontmostPID: 600, agentHostAppPIDs: [])
+        XCTAssertFalse(decide(.done, context: inList, idle: 1).shouldFlash)
+        let notInList = WatchContext(frontmostBundleID: "com.apple.Safari", frontmostPID: 700, agentHostAppPIDs: [])
+        XCTAssertTrue(decide(.done, context: notInList, idle: 1).shouldFlash)
+    }
+
+    func testHostAwareRuleStillNeedsRecentActivity() {
+        let ctx = WatchContext(frontmostBundleID: "x", frontmostPID: 500, agentHostAppPIDs: [500])
+        XCTAssertTrue(decide(.done, context: ctx, idle: 60).shouldFlash)
+        XCTAssertTrue(decide(.attention, context: ctx, idle: 6).shouldFlash)
+    }
+
+    func testNoFrontmostAppMeansFlash() {
+        let ctx = WatchContext(frontmostBundleID: nil, frontmostPID: nil, agentHostAppPIDs: [500])
+        XCTAssertTrue(decide(.done, context: ctx, idle: 0).shouldFlash)
+    }
+
+    func testDisabledIgnoresContext() {
+        config.suppressWhenWatching = false
+        let ctx = WatchContext(frontmostBundleID: "x", frontmostPID: 500, agentHostAppPIDs: [500])
+        XCTAssertTrue(decide(.done, context: ctx, idle: 0).shouldFlash)
+    }
+
     // MARK: Events
 
     func testEventParsingFallsBackToDone() {

@@ -47,6 +47,22 @@ public struct FlashPattern: Equatable {
     }
 }
 
+/// What the app knows about the screen at the moment an alert arrives.
+public struct WatchContext: Equatable {
+    public var frontmostBundleID: String?
+    public var frontmostPID: Int?
+    /// Apps (not helpers) among the alert sender's parent processes: the
+    /// terminal or editor the agent is actually running in. Empty when unknown
+    /// (e.g. the agent runs inside tmux, whose server has no app parent).
+    public var agentHostAppPIDs: [Int]
+
+    public init(frontmostBundleID: String? = nil, frontmostPID: Int? = nil, agentHostAppPIDs: [Int] = []) {
+        self.frontmostBundleID = frontmostBundleID
+        self.frontmostPID = frontmostPID
+        self.agentHostAppPIDs = agentHostAppPIDs
+    }
+}
+
 /// Decides whether an alert should be shown at all.
 public enum AlertPolicy {
     public enum Decision: Equatable {
@@ -70,9 +86,26 @@ public enum AlertPolicy {
                                 config: KeyflashConfig,
                                 frontmostBundleID: String?,
                                 idleSeconds: TimeInterval) -> Decision {
+        evaluate(event: event, config: config,
+                 context: WatchContext(frontmostBundleID: frontmostBundleID),
+                 idleSeconds: idleSeconds)
+    }
+
+    /// If we know which app hosts the agent, "watching" means *that* app is in
+    /// front (so it works for any terminal or editor). Otherwise fall back to the
+    /// configured list of terminal/editor bundle IDs.
+    public static func evaluate(event: AlertEvent,
+                                config: KeyflashConfig,
+                                context: WatchContext,
+                                idleSeconds: TimeInterval) -> Decision {
         guard config.suppressWhenWatching else { return .flash }
-        guard let front = frontmostBundleID,
-              matches(front, in: config.terminalBundleIds) else { return .flash }
+
+        let front = context.frontmostBundleID ?? "unknown app"
+        if !context.agentHostAppPIDs.isEmpty {
+            guard let pid = context.frontmostPID, context.agentHostAppPIDs.contains(pid) else { return .flash }
+        } else {
+            guard let id = context.frontmostBundleID, matches(id, in: config.terminalBundleIds) else { return .flash }
+        }
 
         let window = quietWindow(for: event, config: config)
         if idleSeconds < window {

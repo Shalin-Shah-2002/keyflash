@@ -27,6 +27,44 @@ final class ConfigAndBacklightTests: SandboxedTestCase {
         XCTAssertEqual(config.terminalBundleIds, ["com.example.Term", "com.jetbrains.*"])
     }
 
+    func testSaveKeepsKeysKeyflashDoesNotKnow() throws {
+        try write("enabled: true\nsomeFutureSetting: 42\nmyNote: hello\n", to: ".config/keyflash/config.yaml")
+        var config = ConfigLoader.load()
+        config.enabled = false
+        try ConfigLoader.save(config)
+
+        let saved = try XCTUnwrap(read(".config/keyflash/config.yaml"))
+        XCTAssertTrue(saved.contains("someFutureSetting: 42"), saved)
+        XCTAssertTrue(saved.contains("myNote: hello"), saved)
+        XCTAssertFalse(ConfigLoader.load().enabled)
+    }
+
+    func testUpdatePersistsAndCreatesPrivateFile() throws {
+        try ConfigLoader.update { $0.shouldAutoInstall = false }
+        XCTAssertFalse(ConfigLoader.load().shouldAutoInstall)
+        let mode = try FileManager.default.attributesOfItem(atPath: KeyflashPaths.configFile.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600)
+
+        try ConfigLoader.update { $0.shouldAutoInstall = true }
+        XCTAssertTrue(ConfigLoader.load().shouldAutoInstall)
+    }
+
+    func testSaveRoundTripsEveryKnownKey() throws {
+        var config = KeyflashConfig()
+        config.enabled = false
+        config.suppressWhenWatching = false
+        config.watchingIdleSeconds = 33
+        config.fallbackSound = false
+        config.terminalBundleIds = ["a.b.c", "d.*"]
+        try ConfigLoader.save(config)
+        let loaded = ConfigLoader.load()
+        XCTAssertEqual(loaded.enabled, false)
+        XCTAssertEqual(loaded.suppressWhenWatching, false)
+        XCTAssertEqual(loaded.watchingIdleSeconds, 33)
+        XCTAssertEqual(loaded.fallbackSound, false)
+        XCTAssertEqual(loaded.terminalBundleIds, ["a.b.c", "d.*"])
+    }
+
     func testWatchingWindowIsClamped() throws {
         try write("watchingIdleSeconds: -5\n", to: ".config/keyflash/config.yaml")
         XCTAssertEqual(ConfigLoader.load().watchingIdleSeconds, 0)

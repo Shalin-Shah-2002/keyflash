@@ -69,7 +69,9 @@ struct SettingsWindow: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Button("Install / Repair Agent Hooks") {
+                            ConfigStore.shared.update { $0.shouldAutoInstall = true }
                             AgentHooks.installAll().forEach { log("Settings: \($0)") }
+                            log("Settings: \(ShellHookInstaller.installIfNeeded())")
                             hooksStatus = SettingsWindow.currentHooksStatus()
                         }
                         .buttonStyle(.bordered)

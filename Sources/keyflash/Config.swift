@@ -1,6 +1,5 @@
 import Cocoa
 import KeyflashCore
-import Yams
 
 /// Singleton config store backed by the YAML file at ~/.config/keyflash/config.yaml.
 ///
@@ -11,12 +10,10 @@ public class ConfigStore {
 
     public var config: KeyflashConfig
 
-    private let configDir: URL
     private let configFile: URL
 
     private init() {
         configFile = KeyflashPaths.configFile
-        configDir = configFile.deletingLastPathComponent()
 
         if FileManager.default.fileExists(atPath: configFile.path) {
             config = ConfigLoader.load()
@@ -26,18 +23,19 @@ public class ConfigStore {
         }
     }
 
-    /// Re-reads the file (it may have been edited by hand) before a change.
+    /// Re-reads the file (it may have been edited by hand) before a change, and
+    /// keeps any keys keyflash doesn't know about.
     public func update(_ change: (inout KeyflashConfig) -> Void) {
-        config = ConfigLoader.load()
-        change(&config)
-        save()
+        do {
+            config = try ConfigLoader.update(change)
+        } catch {
+            log("ConfigStore: failed to save config: \(error.localizedDescription)")
+        }
     }
 
     public func save() {
         do {
-            try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-            let yaml = try YAMLEncoder().encode(config)
-            try yaml.write(to: configFile, atomically: true, encoding: .utf8)
+            try ConfigLoader.save(config)
         } catch {
             log("ConfigStore: failed to save config: \(error.localizedDescription)")
         }

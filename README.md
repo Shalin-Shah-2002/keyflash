@@ -54,13 +54,14 @@ Works with:
 - 🔦 **Keyboard Backlight Pulse** — Continuous flash until you interact (key press, mouse click, or scroll).
 - 🎯 **Exact Detection** — Uses Claude Code's `Stop` / `Notification` hooks and an OpenCode plugin (`session.idle`, `permission.asked`, `question.asked`). It fires when the agent finishes its turn or is blocked waiting on you. It never fires for sub-agents, while you type, or on startup.
 - 🎨 **Different Flash for Each Event** — A slow pulse when a task is **done**, a fast blink when an agent **needs you** (permission prompt or question), and a rapid strobe on an **error**. A more urgent flash is never downgraded by a later "done".
-- 🤫 **Quiet When You're Watching** — No flash if a terminal or editor is the frontmost app and you were active in the last 10 seconds (5 s for "needs you" / error). Configurable, and it's just one toggle in Settings.
+- 🤫 **Quiet When You're Watching** — No flash if the app your agent runs in (Terminal, iTerm2, VS Code, Cursor, any terminal or editor) is in front and you were active in the last 10 seconds (5 s for "needs you" / error). keyflash finds that app from the hook's parent processes, so it works for terminals it has never heard of. It's one toggle in Settings.
 - ♻️ **Self-Healing Hooks** — The app (re)installs the hooks on every launch, so they keep pointing at the right `keyflash-run` even after you move or update the app.
 - 💡 **Restores Your Brightness** — The backlight goes back to exactly the level you had before the flash.
 - 🛡️ **Always Stops** — Stops on key press, click or scroll (no special permission needed), from **Stop Flashing** in the menu, and after a 30-minute safety cap.
-- 🔌 **PTY Wrapper (aider)** — For agents without hooks, `keyflash-run -- aider` wraps the CLI under a pseudo-terminal and detects a finished response after you press Enter.
+- 🔊 **Sound Fallback** — If the keyboard backlight can't be controlled (external keyboard, a Mac without one, or the private API stops working), keyflash plays a system sound instead of silently doing nothing. Turn off with `fallbackSound: false`.
+- 🔌 **Generic Wrapper** — For any other agent, `keyflash-run -- <command>` runs it under a pseudo-terminal and flashes when its output goes quiet after you press Enter.
 - 🎨 **Liquid Glass UI** — Polished SwiftUI interface with orange accent theme.
-- 🛠️ **One-Click Setup** — **Install Agent Hooks** in the menu bar sets up Claude Code, OpenCode and the `aider` wrapper.
+- 🛠️ **One-Click Setup** — **Install Agent Hooks** in the menu bar sets up Claude Code, OpenCode and aider.
 - 🔄 **Launch at Login** — Optionally auto-start the menu bar app on login via `SMAppService`.
 - 📝 **Debug Logging** — Everything logged to `~/Library/Logs/keyflash.log` (rotated at 1 MB) for troubleshooting.
 
@@ -155,8 +156,8 @@ This sets up:
 | Agent | What gets installed | Flashes when |
 |---|---|---|
 | **Claude Code** | `Stop` (→ done) + `Notification` (→ needs you) hooks in `~/.claude/settings.json` (your other settings are preserved; the previous file is saved as `settings.json.keyflash-backup`) | Claude finishes its turn, or asks for permission / MCP input |
-| **OpenCode** | Plugin at `~/.config/opencode/plugins/keyflash.js` | The main session goes idle (done), asks for permission or asks you a question (needs you), or errors (Esc-aborts and sub-agent sessions are ignored) |
-| **aider** | `aider` shell function in your rc file that runs it through `keyflash-run` | A response finishes after you press Enter |
+| **OpenCode** | Plugin at `~/.config/opencode/plugins/keyflash.js` (also under `$XDG_CONFIG_HOME/opencode` if your shell sets it when you run `--install-hooks`) | The main session goes idle (done), asks for permission or asks you a question (needs you), or errors (Esc-aborts and sub-agent sessions are ignored) |
+| **aider** | An `aider` shell function in your rc file that adds aider's own `--notifications --notifications-command` flags (no wrapper; aider runs exactly as before) | aider is ready for your input |
 
 **Restart any running `claude` / `opencode` sessions** so they load the hooks. You run them exactly as before, with no aliases needed. (Old `claude`/`opencode` aliases from earlier keyflash versions are removed when you click **Install Agent Hooks**. If you keep them, they're harmless.)
 
@@ -201,7 +202,8 @@ pulseRampDownMs: 150
 pulseFps: 30
 pulseBrightness: 255
 launchAtLogin: false
-shouldAutoInstall: true
+shouldAutoInstall: true       # false = the app won't (re)install hooks on launch
+fallbackSound: true           # play a sound when the backlight can't be controlled
 debugMode: false
 suppressWhenWatching: true
 watchingIdleSeconds: 10
@@ -237,7 +239,7 @@ All activity is logged to `~/Library/Logs/keyflash.log`. Check it for troublesho
 tail -f ~/Library/Logs/keyflash.log
 ```
 
-Enable `debugMode: true` in config (or pass `--debug`) for verbose prompt detection logging in the `keyflash-run` wrapper.
+Enable `debugMode: true` in config (or pass `--debug`) for verbose detection logging in the generic `keyflash-run` wrapper.
 
 ### Simulate an agent finishing
 
@@ -256,8 +258,8 @@ This is exactly what the Claude Code / OpenCode hooks run. If you run it from th
 ```
   Claude Code ── Stop / Notification hook ──┐
   OpenCode ───── keyflash.js plugin ────────┤──▶ keyflash-run --notify <agent>
-  aider ──────── keyflash-run -- aider ─────┘          │
-                 (PTY wrapper, Enter + silence)         │
+  aider ──────── --notifications-command ───┘          │
+                 (its own hook, via a shell function)   │
                                                         ▼
                                      Unix socket (~/Library/Application Support/keyflash/keyflash.sock, 0600)
                                                         │
@@ -277,14 +279,14 @@ This is exactly what the Claude Code / OpenCode hooks run. If you run it from th
 | Component | Language | Purpose |
 |---|---|---|
 | **keyflash** (app) | Swift / SwiftUI | Menu bar app — listens for events, shows settings UI, controls backlight flicker |
-| **keyflash-run** | Swift / C (POSIX) | `--notify` endpoint for agent hooks, `--install-hooks`, and a PTY wrapper for agents without hooks |
+| **keyflash-run** | Swift / C (POSIX) | `--notify` endpoint for agent hooks, `--install-hooks` / `--uninstall-hooks`, and a generic PTY wrapper for other agents |
 | **mac-brightnessctl** | Objective-C | Low-level keyboard backlight control via private CoreBrightness APIs |
 
 ### Key Design Decisions
 
 - **Unix sockets** for IPC (not `DistributedNotificationCenter`) — reliable for unsigned apps on macOS 26+. The socket and log live in your home directory (not shared `/tmp`), so other local users can't hijack or read them.
 - **PTY spawning** (`posix_openpt` + `posix_spawn`) — the wrapped agent gets a real controlling terminal (via a tiny exec helper doing `setsid` + `TIOCSCTTY`), so Ctrl-C and git/ssh/sudo prompts work; your environment and exit code pass through untouched.
-- **Native agent hooks over heuristics** — Claude Code and OpenCode already know exactly when a turn ends. Terminal-output guessing can't be made reliable (typing pauses, spinners, permission prompts), so it's only used as a fallback for aider.
+- **Native agent hooks over heuristics** — Claude Code, OpenCode and aider already know exactly when they finish. Terminal-output guessing can't be made reliable (typing pauses, spinners, permission prompts), so it's only used by the generic `keyflash-run -- <command>` wrapper.
 - **Two input detectors** — A Quartz event tap (instant, needs Input Monitoring) plus polling `CGEventSource` idle time (no permission). The flash always stops.
 - **Continuous flash** — keeps flashing until user interaction, so the signal works even when you're away from the desk.
 - **mac-brightnessctl** bundled inside `.app` — no external dependencies to install.
@@ -326,15 +328,15 @@ keyflash/
 │   │   ├── PulsePreview.swift # Animated pulse preview
 │   │   ├── Theme.swift        # Liquid Glass theme (colors, gradients, modifiers)
 │   │   └── LaunchAgentInstaller.swift  # Login item (SMAppService)
-│   ├── keyflash-run/          # CLI: --notify, --install-hooks, PTY wrapper
+│   ├── keyflash-run/          # CLI: --notify, --install-hooks, generic PTY wrapper
 │   │   └── KeyflashRun.swift
 │   └── KeyflashCore/          # Shared, Foundation-only library
 │       ├── AgentHooks.swift   # Claude Code / OpenCode hook installer
 │       ├── AlertPolicy.swift  # Event types, flash patterns, "quiet when watching" decision
 │       ├── NotifySocket.swift # Unix socket client + server
 │       ├── PTYSpawn.swift     # PTY + posix_spawn + poll I/O loop
-│       ├── PromptDetector.swift  # Enter + silence detection (fallback for aider)
-│       ├── ShellHookInstaller.swift  # aider wrapper installer (rc file)
+│       ├── PromptDetector.swift  # Enter + silence detection (generic wrapper)
+│       ├── ShellHookInstaller.swift  # aider hook installer (rc file)
 │       ├── Backlight.swift    # mac-brightnessctl wrapper
 │       ├── Config.swift       # Config types + loader
 │       └── Log.swift          # Paths + logging
@@ -367,7 +369,7 @@ It stops on any key press, click or scroll. You can also use menu bar → **Stop
 
 Claude Code and OpenCode no longer run through a wrapper, so this can't happen to them. If you still have old keyflash `alias claude=…` / `alias opencode=…` lines, click **Install Agent Hooks** to remove them, then open a new terminal.
 
-For the `aider` wrapper, the terminal size is copied at start and on every resize (`SIGWINCH`).
+For the generic `keyflash-run -- <command>` wrapper, the terminal size is copied at start and on every resize (`SIGWINCH`).
 
 ### 🔌 Claude Code hook shows an error
 
@@ -383,7 +385,7 @@ If Claude Code reports a hook error, the app was probably moved. Launch it from 
 /Applications/keyflash.app/Contents/MacOS/keyflash-run --uninstall-hooks
 ```
 
-Then delete the `# >>> keyflash >>>` / `# <<< keyflash <<<` block from your shell rc file (only present if you use the aider wrapper). Set `shouldAutoInstall: false` in the config to stop the app from re-adding hooks on launch.
+This removes the Claude Code hooks, the OpenCode plugin and the aider function, and sets `shouldAutoInstall: false` so the app doesn't put them back on its next launch (run `--install-hooks`, or use **Install Agent Hooks**, to turn them back on).
 
 ### Remove the app
 

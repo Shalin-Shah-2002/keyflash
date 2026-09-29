@@ -34,21 +34,27 @@ public enum AgentHooks {
         home.appendingPathComponent(".claude/settings.json")
     }
 
-    static var opencodeConfigDir: URL {
-        if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
-            return URL(fileURLWithPath: xdg).appendingPathComponent("opencode")
+    /// Where OpenCode may look for config: `~/.config/opencode`, plus
+    /// `$XDG_CONFIG_HOME/opencode` when that is set to something else. The menu bar
+    /// app (started by macOS) doesn't see the XDG variable your shell has, so
+    /// installing to both covers either way OpenCode was launched.
+    static var opencodeConfigDirs: [URL] {
+        var dirs = [home.appendingPathComponent(".config/opencode")]
+        if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], xdg.hasPrefix("/") {
+            let dir = URL(fileURLWithPath: xdg).appendingPathComponent("opencode")
+            if dir.path != dirs[0].path { dirs.append(dir) }
         }
-        return home.appendingPathComponent(".config/opencode")
+        return dirs
     }
 
-    static var opencodePluginURL: URL {
-        opencodeConfigDir.appendingPathComponent("plugins/keyflash.js")
+    static var opencodePluginURLs: [URL] {
+        opencodeConfigDirs.map { $0.appendingPathComponent("plugins/keyflash.js") }
     }
 
     /// Older OpenCode releases used the singular `plugin/` directory. Current
     /// releases load both, so a copy there would fire twice.
-    static var legacyOpencodePluginURL: URL {
-        opencodeConfigDir.appendingPathComponent("plugin/keyflash.js")
+    static var legacyOpencodePluginURLs: [URL] {
+        opencodeConfigDirs.map { $0.appendingPathComponent("plugin/keyflash.js") }
     }
 
     /// Path of the `keyflash-run` binary that ships next to the running executable
@@ -70,7 +76,7 @@ public enum AgentHooks {
                   let text = String(data: data, encoding: .utf8) else { return false }
             return text.contains(marker)
         case .opencode:
-            return FileManager.default.fileExists(atPath: opencodePluginURL.path)
+            return opencodePluginURLs.contains { FileManager.default.fileExists(atPath: $0.path) }
         }
     }
 
@@ -93,7 +99,7 @@ public enum AgentHooks {
         }
         do {
             let changed = try installOpenCode(runPath: runPath)
-            lines.append("OpenCode: \(changed ? "plugin installed" : "plugin already up to date") (\(opencodePluginURL.path))")
+            lines.append("OpenCode: \(changed ? "plugin installed" : "plugin already up to date") (\(opencodePluginURLs.map(\.path).joined(separator: ", ")))")
         } catch {
             lines.append("OpenCode: FAILED — \(error.localizedDescription)")
         }
@@ -110,8 +116,9 @@ public enum AgentHooks {
         } catch {
             lines.append("Claude Code: FAILED — \(error.localizedDescription)")
         }
-        try? FileManager.default.removeItem(at: opencodePluginURL)
-        try? FileManager.default.removeItem(at: legacyOpencodePluginURL)
+        for url in opencodePluginURLs + legacyOpencodePluginURLs {
+            try? FileManager.default.removeItem(at: url)
+        }
         lines.append("OpenCode: plugin removed")
         return lines
     }
@@ -240,21 +247,22 @@ public enum AgentHooks {
 
     // MARK: - OpenCode
 
-    /// Returns true if the plugin file was created or changed.
+    /// Returns true if any plugin file was created or changed.
     @discardableResult
     public static func installOpenCode(runPath: String) throws -> Bool {
         let fm = FileManager.default
-        let url = opencodePluginURL
         let contents = opencodePluginSource(runPath: runPath)
+        var changed = false
 
-        try? fm.removeItem(at: legacyOpencodePluginURL)
+        for legacy in legacyOpencodePluginURLs { try? fm.removeItem(at: legacy) }
 
-        if let existing = try? String(contentsOf: url, encoding: .utf8), existing == contents {
-            return false
+        for url in opencodePluginURLs {
+            if let existing = try? String(contentsOf: url, encoding: .utf8), existing == contents { continue }
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+            changed = true
         }
-        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try contents.write(to: url, atomically: true, encoding: .utf8)
-        return true
+        return changed
     }
 
     static func opencodePluginSource(runPath: String) -> String {

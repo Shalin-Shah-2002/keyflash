@@ -39,15 +39,16 @@ struct KeyflashRun: ParsableCommand {
         commandName: "keyflash-run",
         abstract: "Wrap a coding-agent CLI and flash the keyboard backlight on task completion.",
         discussion: """
-        Claude Code and OpenCode report task completion themselves through hooks
-        (installed automatically by the menu bar app, or with --install-hooks), so
-        they don't need to be wrapped. Wrapping is for other agents such as aider.
+        Claude Code, OpenCode and aider report task completion themselves through
+        hooks (installed by the menu bar app, or with --install-hooks), so none of
+        them needs to be wrapped. `keyflash-run -- <command>` is a generic wrapper
+        for other agents: it flashes when output goes quiet after you press Enter.
 
         Examples:
           keyflash-run --install-hooks
           keyflash-run --notify claude
           keyflash-run --notify claude --event attention
-          keyflash-run -- aider
+          keyflash-run -- some-other-agent
           keyflash-run --test-pulse
         """,
         version: "0.3.0"
@@ -68,10 +69,10 @@ struct KeyflashRun: ParsableCommand {
     @Option(name: .long, help: "With --notify: done (default), attention (agent needs you) or error")
     var event: String?
 
-    @Flag(name: .long, help: "Install Claude Code and OpenCode completion hooks")
+    @Flag(name: .long, help: "Install the Claude Code, OpenCode and aider completion hooks")
     var installHooks = false
 
-    @Flag(name: .long, help: "Remove the Claude Code and OpenCode completion hooks")
+    @Flag(name: .long, help: "Remove the completion hooks (and stop the app from reinstalling them)")
     var uninstallHooks = false
 
     mutating func run() throws {
@@ -90,12 +91,20 @@ struct KeyflashRun: ParsableCommand {
 
         if installHooks {
             AgentHooks.installAll().forEach { print($0) }
-            print("Restart any running claude/opencode sessions to pick up the hooks.")
+            print(ShellHookInstaller.installIfNeeded())
+            // Undo a previous --uninstall-hooks: let the app keep them up to date again.
+            _ = try? ConfigLoader.update { $0.shouldAutoInstall = true }
+            print("Restart running claude/opencode sessions, and open a new terminal for aider.")
             return
         }
 
         if uninstallHooks {
             AgentHooks.uninstallAll().forEach { print($0) }
+            ShellHookInstaller.remove()
+            print("Shell hook removed")
+            // Otherwise the menu bar app would put them back on its next launch.
+            _ = try? ConfigLoader.update { $0.shouldAutoInstall = false }
+            print("Automatic reinstall is off (run --install-hooks to turn it back on).")
             return
         }
 

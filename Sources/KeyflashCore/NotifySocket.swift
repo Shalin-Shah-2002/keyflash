@@ -9,19 +9,24 @@ import Glibc
 // menu bar app (server) over a per-user Unix domain socket, because
 // `DistributedNotificationCenter` is unreliable for unsigned apps on macOS 26.
 //
-// Wire format: one line, "agent=<name> pid=<pid> event=<done|attention|error>\n".
-// `event` is optional (missing/unknown means `done`) so old hooks keep working.
+// Wire format: one line,
+//   "agent=<name> pid=<pid> event=<done|attention|error> ancestors=<pid,pid,...>\n".
+// `event` and `ancestors` are optional (missing event means `done`) so old hooks
+// keep working. `ancestors` lists the sender's parent processes, so the app can
+// tell which app (terminal / editor) the agent is running in.
 
 /// One task-completion / attention message from an agent hook.
 public struct NotifyMessage: Equatable {
     public let agent: String
     public let pid: Int
     public let event: AlertEvent
+    public let ancestors: [Int]
 
-    public init(agent: String, pid: Int, event: AlertEvent = .done) {
+    public init(agent: String, pid: Int, event: AlertEvent = .done, ancestors: [Int] = []) {
         self.agent = agent
         self.pid = pid
         self.event = event
+        self.ancestors = ancestors
     }
 }
 
@@ -61,6 +66,7 @@ public enum NotifyClient {
     /// Never blocks for long and never raises SIGPIPE.
     @discardableResult
     public static func send(agent: String, pid: Int, event: AlertEvent = .done,
+                            ancestors: [Int]? = nil,
                             socketPath: String = KeyflashPaths.socketPath) -> Bool {
         let fd = socket(AF_UNIX, streamSocketType, 0)
         guard fd >= 0 else {
@@ -84,7 +90,10 @@ public enum NotifyClient {
         }
 
         let safeAgent = agent.filter { !$0.isWhitespace && $0 != "=" }
-        let bytes = Array("agent=\(safeAgent.isEmpty ? "agent" : safeAgent) pid=\(pid) event=\(event.rawValue)\n".utf8)
+        // Our parents: the agent, its shell, and the terminal/editor app hosting it.
+        let chain = ancestors ?? ProcessTree.ancestors(startingAt: Int(getppid()))
+        let chainField = chain.isEmpty ? "" : " ancestors=" + chain.map(String.init).joined(separator: ",")
+        let bytes = Array("agent=\(safeAgent.isEmpty ? "agent" : safeAgent) pid=\(pid) event=\(event.rawValue)\(chainField)\n".utf8)
         #if canImport(Darwin)
         let flags: Int32 = 0
         #else
@@ -216,14 +225,16 @@ public final class NotifyServer {
         var agent: String?
         var pid = 0
         var event: String?
+        var ancestors: [Int] = []
         for part in line.split(separator: " ") {
             let kv = part.split(separator: "=", maxSplits: 1)
             guard kv.count == 2 else { continue }
             if kv[0] == "agent" { agent = String(kv[1]) }
             if kv[0] == "pid" { pid = Int(kv[1]) ?? 0 }
             if kv[0] == "event" { event = String(kv[1]) }
+            if kv[0] == "ancestors" { ancestors = kv[1].split(separator: ",").prefix(64).compactMap { Int($0) } }
         }
         guard let agent, !agent.isEmpty else { return nil }
-        return NotifyMessage(agent: agent, pid: pid, event: AlertEvent(wire: event))
+        return NotifyMessage(agent: agent, pid: pid, event: AlertEvent(wire: event), ancestors: ancestors)
     }
 }

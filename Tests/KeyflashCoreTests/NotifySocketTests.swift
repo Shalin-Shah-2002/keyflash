@@ -28,11 +28,23 @@ final class NotifySocketTests: SandboxedTestCase {
             let server = makeServer { got = $0; received.fulfill() }
             XCTAssertTrue(server.start())
 
-            XCTAssertTrue(NotifyClient.send(agent: "claude", pid: 42, event: event, socketPath: socketPath))
+            XCTAssertTrue(NotifyClient.send(agent: "claude", pid: 42, event: event, ancestors: [900, 800, 700], socketPath: socketPath))
             wait(for: [received], timeout: 5)
             server.stop()
-            XCTAssertEqual(got, NotifyMessage(agent: "claude", pid: 42, event: event))
+            XCTAssertEqual(got, NotifyMessage(agent: "claude", pid: 42, event: event, ancestors: [900, 800, 700]))
         }
+    }
+
+    func testClientSendsItsAncestorsByDefault() throws {
+        let received = expectation(description: "received")
+        var got: NotifyMessage?
+        let server = makeServer { got = $0; received.fulfill() }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        XCTAssertTrue(NotifyClient.send(agent: "claude", pid: 1, socketPath: socketPath))
+        wait(for: [received], timeout: 5)
+        XCTAssertEqual(got?.ancestors.first, Int(getppid()), "starts at the sender's parent")
     }
 
     func testSocketIsPrivateToTheUser() {
@@ -146,6 +158,10 @@ final class NotifySocketTests: SandboxedTestCase {
         XCTAssertEqual(NotifyServer.parse(Array("agent=claude pid=12 event=attention\n".utf8))?.event, .attention)
         XCTAssertEqual(NotifyServer.parse(Array("agent=x pid=1 event=error\n".utf8))?.event, .error)
         XCTAssertEqual(NotifyServer.parse(Array("agent=x pid=1 event=bogus\n".utf8))?.event, .done, "unknown falls back to done")
+        XCTAssertEqual(NotifyServer.parse(Array("agent=x pid=1 ancestors=30,20,10\n".utf8))?.ancestors, [30, 20, 10])
+        XCTAssertEqual(NotifyServer.parse(Array("agent=x pid=1 ancestors=30,zz,10\n".utf8))?.ancestors, [30, 10], "bad entries are skipped")
+        let many = (1...500).map(String.init).joined(separator: ",")
+        XCTAssertEqual(NotifyServer.parse(Array("agent=x pid=1 ancestors=\(many)\n".utf8))?.ancestors.count, 64, "capped")
         XCTAssertNil(NotifyServer.parse(Array("garbage".utf8)))
         XCTAssertNil(NotifyServer.parse([0xff, 0xfe]))
     }

@@ -156,6 +156,22 @@ final class AgentHooksTests: SandboxedTestCase {
         XCTAssertTrue(AgentHooks.isInstalled(.opencode))
     }
 
+    func testOpenCodePluginGoesToXDGConfigHomeToo() throws {
+        let xdg = home.appendingPathComponent("xdg-config")
+        let saved = getenv("XDG_CONFIG_HOME").map { String(cString: $0) }
+        setenv("XDG_CONFIG_HOME", xdg.path, 1)
+        defer { if let saved { setenv("XDG_CONFIG_HOME", saved, 1) } else { unsetenv("XDG_CONFIG_HOME") } }
+
+        XCTAssertTrue(try AgentHooks.installOpenCode(runPath: runPath))
+        XCTAssertNotNil(read(".config/opencode/plugins/keyflash.js"), "the default location")
+        XCTAssertNotNil(read("xdg-config/opencode/plugins/keyflash.js"), "and where a shell with XDG_CONFIG_HOME looks")
+        XCTAssertFalse(try AgentHooks.installOpenCode(runPath: runPath), "idempotent")
+
+        AgentHooks.uninstallAll()
+        XCTAssertNil(read(".config/opencode/plugins/keyflash.js"))
+        XCTAssertNil(read("xdg-config/opencode/plugins/keyflash.js"))
+    }
+
     func testInstallAllRequiresExecutable() {
         let lines = AgentHooks.installAll(runPath: home.appendingPathComponent("missing").path)
         XCTAssertEqual(lines.count, 1)

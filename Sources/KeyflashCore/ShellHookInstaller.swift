@@ -1,36 +1,39 @@
 import Foundation
 
-/// Installs a shell alias so `aider` is transparently wrapped by `keyflash-run`.
+/// Installs a shell function so `aider` reports completion to keyflash.
 ///
-/// Claude Code and OpenCode are *not* aliased any more: they report task
-/// completion exactly through `AgentHooks`, and running them under a PTY
-/// wrapper only adds risk. Installing removes any old keyflash block
-/// (including earlier `claude`/`opencode` aliases) from every rc file.
+/// aider has its own hook: `--notifications-command` runs a command whenever it
+/// is ready for your input. The function just adds those two flags, so aider runs
+/// exactly as before (no wrapper, no PTY). Claude Code and OpenCode use their own
+/// hooks (`AgentHooks`). Installing removes any older keyflash block (including
+/// earlier `claude`/`opencode` aliases and the old aider wrapper) from every rc file.
 public enum ShellHookInstaller {
-    private static func makeHookTemplate() -> String {
-        let quoted = shellQuote(AgentHooks.defaultRunPath())
+    /// The command aider runs (through a shell) when it wants your input.
+    static func aiderNotifyCommand(runPath: String) -> String {
+        "\(shellQuote(runPath)) --notify aider --event done"
+    }
+
+    static func makeHookTemplate(runPath: String) -> String {
+        let command = shellQuote(aiderNotifyCommand(runPath: runPath))
         return """
 # >>> keyflash >>>
-# Auto-installed — wraps aider for keyboard backlight notifications.
-# (Claude Code and OpenCode use native hooks and need no wrapper.)
-# To disable: remove this block entirely.
-if [ -x \(quoted) ]; then
-  function aider { \(quoted) -- aider "$@"; }
+# Auto-installed — flashes the keyboard backlight when aider is ready for input.
+# (Claude Code and OpenCode use their own hooks.) To disable: remove this block.
+if [ -x \(shellQuote(runPath)) ]; then
+  function aider { command aider --notifications --notifications-command \(command) "$@"; }
 fi
 # <<< keyflash <<<
 """
     }
 
-    private static func makeFishTemplate() -> String {
-        let runPath = AgentHooks.defaultRunPath()
-        let quoted = "'" + runPath.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'") + "'"
+    static func makeFishTemplate(runPath: String) -> String {
+        let command = fishQuote(aiderNotifyCommand(runPath: runPath))
         return """
 # >>> keyflash >>>
-# Auto-installed — wraps aider for keyboard backlight notifications.
-# (Claude Code and OpenCode use native hooks and need no wrapper.)
-if test -x \(quoted)
-  function aider; \(quoted) -- aider $argv; end
+# Auto-installed — flashes the keyboard backlight when aider is ready for input.
+# (Claude Code and OpenCode use their own hooks.) To disable: remove this block.
+if test -x \(fishQuote(runPath))
+  function aider; command aider --notifications --notifications-command \(command) $argv; end
 end
 # <<< keyflash <<<
 """
@@ -41,10 +44,15 @@ end
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// Single-quotes a string for fish (inside single quotes fish only escapes \\ and \').
+    private static func fishQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'") + "'"
+    }
+
     /// Installs the hook into the current shell's rc file, removing keyflash
     /// blocks from every other rc file. Returns a human-readable status line.
     @discardableResult
-    public static func installIfNeeded(shell: String? = nil) -> String {
+    public static func installIfNeeded(shell: String? = nil, runPath: String = AgentHooks.defaultRunPath()) -> String {
         // Resolve symlinks so dotfiles-managed rc files stay symlinks.
         let target = detectRcFile(shell: shell).resolvingSymlinksInPath()
         for file in allRcFiles() where file.resolvingSymlinksInPath() != target {
@@ -52,7 +60,7 @@ end
         }
 
         let isFish = target.path.hasSuffix("config.fish")
-        let block = isFish ? makeFishTemplate() : makeHookTemplate()
+        let block = isFish ? makeFishTemplate(runPath: runPath) : makeHookTemplate(runPath: runPath)
         var existing = ""
         if FileManager.default.fileExists(atPath: target.path) {
             // Never treat an unreadable file as empty: we'd overwrite the user's rc file.
@@ -76,6 +84,36 @@ end
             return "Shell hook installed → \(target.path)"
         } catch {
             return "Shell hook FAILED → \(target.path): \(error.localizedDescription)"
+        }
+    }
+
+    /// Re-points an already-installed hook at the current `keyflash-run` (e.g.
+    /// after the app moved). Never adds a hook where there isn't one, and edits
+    /// the block in place, wherever it lives. Returns the files it changed.
+    @discardableResult
+    public static func refreshInstalled(runPath: String = AgentHooks.defaultRunPath()) -> [String] {
+        guard FileManager.default.isExecutableFile(atPath: runPath) else { return [] }
+        var changed: [String] = []
+        for link in allRcFiles() {
+            let file = link.resolvingSymlinksInPath()
+            guard let text = try? String(contentsOf: file, encoding: .utf8),
+                  text.contains("# >>> keyflash >>>") else { continue }
+            let block = file.path.hasSuffix("config.fish") ? makeFishTemplate(runPath: runPath) : makeHookTemplate(runPath: runPath)
+            let updated = text.replacingOccurrences(
+                of: "(?ms)^# >>> keyflash >>>.*?^# <<< keyflash <<<[^\\n]*(\\n|\\z)",
+                with: NSRegularExpression.escapedTemplate(for: block + "\n"),
+                options: .regularExpression)
+            if updated != text, (try? writePreservingMode(Data(updated.utf8), to: file)) != nil {
+                changed.append(file.path)
+            }
+        }
+        return changed
+    }
+
+    /// True if any rc file has a keyflash block.
+    public static var isInstalled: Bool {
+        allRcFiles().contains {
+            ((try? String(contentsOf: $0.resolvingSymlinksInPath(), encoding: .utf8)) ?? "").contains("# >>> keyflash >>>")
         }
     }
 

@@ -109,12 +109,32 @@ final class BacklightFlickerController {
 
     func testFlicker(event: AlertEvent) { log("BacklightFlicker: test \(event.rawValue)"); flickerUntilInteraction(event: event) }
 
+    /// The backlight can't be controlled here, so make a sound instead of silently
+    /// losing the alert (external keyboard, unsupported Mac, or the private API broke).
+    private func fallbackAlert() {
+        guard ConfigLoader.load().fallbackSound else { return }
+        let name: String
+        switch currentEvent {
+        case .done: name = "Glass"
+        case .attention: name = "Ping"
+        case .error: name = "Basso"
+        }
+        log("BacklightFlicker: backlight unavailable — playing \(name) instead")
+        if let sound = NSSound(named: NSSound.Name(name)) {
+            sound.play()
+        } else {
+            NSSound.beep()
+        }
+    }
+
     // MARK: - Backlight queue
 
     private func hwStartFlash(generation gen: Int, pattern: FlashPattern) {
         guard let backlight = hwBacklight ?? Backlight() else {
             log("BacklightFlicker: mac-brightnessctl not found, cannot flash")
-            DispatchQueue.main.async { if self.generation == gen { self.stop(reason: "no backlight tool") } }
+            DispatchQueue.main.async {
+                if self.generation == gen { self.fallbackAlert(); self.stop(reason: "no backlight tool") }
+            }
             return
         }
         hwBacklight = backlight
@@ -140,7 +160,11 @@ final class BacklightFlickerController {
                 self.hwFlashTask = nil
                 log("BacklightFlicker: flash process ended by itself (status \(finished.terminationStatus))")
                 DispatchQueue.main.async {
-                    if self.generation == gen { self.stop(reason: "flash ended") }
+                    guard self.generation == gen else { return }
+                    // A non-zero exit means the helper couldn't drive the backlight
+                    // (no built-in keyboard backlight, or the private API is gone).
+                    if finished.terminationStatus != 0 { self.fallbackAlert() }
+                    self.stop(reason: "flash ended")
                 }
             }
         }
@@ -150,7 +174,9 @@ final class BacklightFlickerController {
             log("BacklightFlicker: flash running (saved brightness \(hwSavedLevel ?? -1))")
         } catch {
             log("BacklightFlicker: failed to launch flash: \(error.localizedDescription)")
-            DispatchQueue.main.async { if self.generation == gen { self.stop(reason: "launch failed") } }
+            DispatchQueue.main.async {
+                if self.generation == gen { self.fallbackAlert(); self.stop(reason: "launch failed") }
+            }
         }
     }
 
@@ -285,7 +311,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func startNotificationService() {
         let server = NotifyServer { [weak self] message in
             log("AppDelegate: received \(message.event.rawValue) — agent=\(message.agent) pid=\(message.pid)")
-            self?.handleAlert(message.event)
+            self?.handleAlert(message)
         }
         if !server.start() {
             let alert = NSAlert()
@@ -308,19 +334,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             for line in AgentHooks.installAll() {
                 log("AppDelegate: \(line)")
             }
+            // Keep an already-installed aider hook pointing at this copy of the app.
+            for file in ShellHookInstaller.refreshInstalled() {
+                log("AppDelegate: refreshed shell hook in \(file)")
+            }
         }
     }
 
-    func handleAlert(_ event: AlertEvent) {
+    func handleAlert(_ message: NotifyMessage) {
+        let event = message.event
         let config = ConfigLoader.load()
         guard config.enabled && config.backlightEnabled else { return }
 
-        // Stay quiet when you're already watching: a terminal/editor is in
-        // front and you were active moments ago.
+        // Stay quiet when you're already watching the agent: the app it runs in
+        // (found from the sender's parent processes) is in front and you were
+        // active moments ago.
+        let front = NSWorkspace.shared.frontmostApplication
+        let hostApps = message.ancestors.filter {
+            NSRunningApplication(processIdentifier: pid_t($0))?.activationPolicy == .regular
+        }
         let decision = AlertPolicy.evaluate(
             event: event,
             config: config,
-            frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            context: WatchContext(
+                frontmostBundleID: front?.bundleIdentifier,
+                frontmostPID: front.map { Int($0.processIdentifier) },
+                agentHostAppPIDs: hostApps
+            ),
             idleSeconds: BacklightFlickerController.secondsSinceLastUserInput()
         )
         switch decision {
@@ -359,6 +399,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func installHooks() {
+        ConfigStore.shared.update { $0.shouldAutoInstall = true }
         var lines = AgentHooks.installAll()
         lines.append(ShellHookInstaller.installIfNeeded())
         lines.forEach { log("AppDelegate: \($0)") }
