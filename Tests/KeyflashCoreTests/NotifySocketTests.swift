@@ -97,7 +97,7 @@ final class NotifySocketTests: SandboxedTestCase {
             for (i, b) in socketPath.utf8.enumerated() { ptr[i] = b }
         }
         let bound = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { rawBind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
         XCTAssertEqual(bound, 0)
         close(fd)
@@ -150,6 +150,9 @@ final class NotifySocketTests: SandboxedTestCase {
         XCTAssertNil(NotifyServer.parse([0xff, 0xfe]))
     }
 }
+
+/// bind(2) (inside a test case on macOS, a plain `bind` resolves to NSObject's KVO `bind`).
+private func rawBind(_ fd: Int32, _ addr: UnsafePointer<sockaddr>, _ len: socklen_t) -> Int32 { bind(fd, addr, len) }
 
 /// write(2) (a plain `write` inside the test case resolves to the helper method).
 private func rawWrite(_ fd: Int32, _ buf: UnsafeRawPointer, _ len: Int) -> Int { write(fd, buf, len) }

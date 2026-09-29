@@ -200,7 +200,13 @@ public class PTYSpawn {
             }
 
             // Our stdin → child (readable also covers EOF and hangup).
-            if ret > 0 && pfds[2].revents != 0 {
+            if ret > 0 && (pfds[2].revents & Int16(POLLNVAL)) != 0 {
+                // poll() can't watch this stdin. Never fall through to a blocking
+                // read (it would freeze the loop on a terminal): stop forwarding input.
+                keyflashLog("PTYSpawn: stdin is not pollable; input forwarding disabled")
+                stdinOpen = false
+                eofSent = 6
+            } else if ret > 0 && pfds[2].revents != 0 {
                 let n = read(STDIN_FILENO, &buf, 4096)
                 if n > 0 {
                     pendingInput += buf[0..<n]
