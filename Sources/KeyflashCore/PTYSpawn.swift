@@ -159,12 +159,19 @@ public class PTYSpawn {
         let signals = SignalPipe(watching: [SIGWINCH, SIGTERM, SIGHUP, SIGINT, SIGQUIT])
         defer { signals?.restore() }
 
-        // Everything is multiplexed in one poll() loop: PTY output, our stdin,
-        // and pending signals. (A dispatch/epoll source can't watch /dev/null or a
-        // redirected file on Linux, and poll() needs no extra threads or locks.)
+        // One poll() loop multiplexes PTY output, our stdin and pending signals.
+        //
+        // stdin itself can't be polled portably: epoll (dispatch sources on Linux)
+        // rejects /dev/null and files, and macOS poll() rejects character devices
+        // such as /dev/null. So a small thread does a plain blocking read of stdin
+        // (which works for terminals, pipes, files and /dev/null everywhere) and
+        // feeds a pipe, which every platform can poll. A full pipe blocks the
+        // thread, which is the backpressure we want.
+        //
         // The master is non-blocking so a child that isn't reading its input can
         // never stop us from draining its output.
         _ = fcntl(masterFd, F_SETFL, fcntl(masterFd, F_GETFL) | O_NONBLOCK)
+        let stdinPump = StdinPump()
 
         var buf = [UInt8](repeating: 0, count: 65536)
         var pendingInput: [UInt8] = []      // typed/piped bytes not yet accepted by the child
@@ -177,7 +184,7 @@ public class PTYSpawn {
                 pollfd(fd: masterFd, events: Int16(POLLIN) | (pendingInput.isEmpty ? 0 : Int16(POLLOUT)), revents: 0),
                 pollfd(fd: signals?.readFD ?? -1, events: Int16(POLLIN), revents: 0),
                 // Backpressure: don't read more input while the child is behind.
-                pollfd(fd: (stdinOpen && pendingInput.isEmpty) ? STDIN_FILENO : -1, events: Int16(POLLIN), revents: 0),
+                pollfd(fd: (stdinOpen && pendingInput.isEmpty) ? stdinPump.readFD : -1, events: Int16(POLLIN), revents: 0),
             ]
             let ret = poll(&pfds, nfds_t(pfds.count), 100)  // 100ms timeout
 
@@ -199,15 +206,9 @@ public class PTYSpawn {
                 }
             }
 
-            // Our stdin → child (readable also covers EOF and hangup).
-            if ret > 0 && (pfds[2].revents & Int16(POLLNVAL)) != 0 {
-                // poll() can't watch this stdin. Never fall through to a blocking
-                // read (it would freeze the loop on a terminal): stop forwarding input.
-                keyflashLog("PTYSpawn: stdin is not pollable; input forwarding disabled")
-                stdinOpen = false
-                eofSent = 6
-            } else if ret > 0 && pfds[2].revents != 0 {
-                let n = read(STDIN_FILENO, &buf, 4096)
+            // Our stdin (via the pump pipe) → child. Readable also covers EOF.
+            if ret > 0 && pfds[2].revents != 0 {
+                let n = read(stdinPump.readFD, &buf, 4096)
                 if n > 0 {
                     pendingInput += buf[0..<n]
                     detector.noteUserInput(buf[0..<n])
@@ -372,6 +373,61 @@ private func writeAll(_ fd: Int32, _ bytes: UnsafeRawPointer, _ count: Int) {
         if n > 0 {
             offset += n
         } else if n < 0 && (errno == EINTR || errno == EAGAIN) {
+            continue
+        } else {
+            return
+        }
+    }
+}
+
+/// Copies our stdin into a pipe from a background thread (see the note in `run`).
+///
+/// If stdin is a terminal the thread may still be blocked in `read` when the
+/// session ends; that is fine because `keyflash-run` exits right after. The pipe's
+/// read end is deliberately never closed: closing it would make that leftover
+/// thread's next write raise SIGPIPE.
+private final class StdinPump {
+    let readFD: Int32
+
+    init() {
+        var fds: [Int32] = [-1, -1]
+        guard pipe(&fds) == 0 else {
+            readFD = -1   // stdin forwarding unavailable; the loop ignores fd -1
+            return
+        }
+        readFD = fds[0]
+        let writeFD = fds[1]
+        _ = fcntl(fds[0], F_SETFD, FD_CLOEXEC)   // never leak into the child
+        _ = fcntl(writeFD, F_SETFD, FD_CLOEXEC)
+
+        Thread.detachNewThread {
+            var chunk = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let n = read(STDIN_FILENO, &chunk, chunk.count)
+                if n > 0 {
+                    writeAllOrFail(writeFD, chunk, n)
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else if n < 0 && errno == EAGAIN {
+                    usleep(10_000)   // stdin was left non-blocking by someone else
+                    continue
+                } else {
+                    break            // EOF or error
+                }
+            }
+            close(writeFD)
+        }
+    }
+}
+
+/// Like `writeAll`, but blocks on a full pipe and gives up if the reader is gone.
+private func writeAllOrFail(_ fd: Int32, _ bytes: [UInt8], _ count: Int) {
+    var offset = 0
+    while offset < count {
+        let n = bytes.withUnsafeBytes { write(fd, $0.baseAddress! + offset, count - offset) }
+        if n > 0 {
+            offset += n
+        } else if n < 0 && errno == EINTR {
             continue
         } else {
             return
